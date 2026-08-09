@@ -1,0 +1,527 @@
+"""Supabase persistence layer.
+
+The single rule in this module: **a database failure must never cost the
+customer a reply.** Every public function catches its own exceptions and logs
+them. Reads return an empty default, writes return None or False. Callers may
+check the result, but nothing here raises into a request path.
+
+The app is stateless; this module is the memory. Any instance can serve any
+webhook, which is what makes Render's sleep/wake cycle survivable.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+
+from supabase import AsyncClient, AsyncClientOptions, acreate_client
+
+from app.config import settings
+from app.enums import (
+    AiLogEvent,
+    Channel,
+    ConversationStatus,
+    HandoverStatus,
+    MessageRole,
+)
+from app.logging_config import get_logger
+from app.models import (
+    ConversationSummary,
+    Customer,
+    HandoverRequest,
+    LeadScore,
+    Message,
+    OptOutEntry,
+    parse_conversation_id,
+)
+
+log = get_logger(__name__)
+
+_client: AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def get_client() -> AsyncClient | None:
+    """Lazily create the shared client. Returns None if unconfigured or if
+    construction fails, so an unconfigured deployment degrades to no-persistence
+    rather than refusing to boot."""
+    global _client
+    if _client is not None:
+        return _client
+    if not settings.supabase_url or not settings.supabase_service_key:
+        log.warning("supabase_not_configured")
+        return None
+    async with _client_lock:
+        if _client is not None:
+            return _client
+        try:
+            _client = await acreate_client(
+                settings.supabase_url,
+                settings.supabase_service_key,
+                options=AsyncClientOptions(
+                    postgrest_client_timeout=int(settings.supabase_timeout_seconds),
+                ),
+            )
+        except Exception:
+            log.exception("supabase_client_init_failed")
+            return None
+    return _client
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# customers
+# ---------------------------------------------------------------------------
+
+
+async def upsert_customer(customer: Customer) -> str | None:
+    """Insert or update by (channel, channel_user_id). Returns the customer id.
+
+    Only non-null fields are written, so a later turn that learns just the
+    company name cannot blank out a name captured earlier.
+    """
+    client = await get_client()
+    if client is None:
+        return None
+    payload = customer.model_dump(exclude_none=True, exclude={"id"})
+    try:
+        result = (
+            await client.table("customers")
+            .upsert(payload, on_conflict="channel,channel_user_id")
+            .execute()
+        )
+        customer_id = result.data[0]["id"] if result.data else None
+        log.info(
+            "customer_upserted",
+            extra={"customer_id": customer_id, "channel": str(customer.channel)},
+        )
+        return customer_id
+    except Exception:
+        log.exception("customer_upsert_failed", extra={"channel": str(customer.channel)})
+        return None
+
+
+async def get_customer(channel: Channel, channel_user_id: str) -> dict[str, Any] | None:
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("customers")
+            .select("*")
+            .eq("channel", str(channel))
+            .eq("channel_user_id", channel_user_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("customer_fetch_failed")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# conversations
+# ---------------------------------------------------------------------------
+
+
+async def ensure_conversation(conversation_id: str, customer_id: str | None = None) -> None:
+    """Create the conversation row if absent, otherwise bump last_message_at.
+
+    last_message_at drives follow-up queues and recency ranking, so it is
+    refreshed on every turn.
+    """
+    client = await get_client()
+    if client is None:
+        return
+    try:
+        channel, _ = parse_conversation_id(conversation_id)
+    except ValueError:
+        log.error("bad_conversation_id", extra={"conversation_id": conversation_id})
+        return
+    payload: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "channel": str(channel),
+        "last_message_at": _now(),
+    }
+    if customer_id:
+        payload["customer_id"] = customer_id
+    try:
+        await client.table("conversations").upsert(payload, on_conflict="conversation_id").execute()
+    except Exception:
+        log.exception("conversation_upsert_failed", extra={"conversation_id": conversation_id})
+
+
+async def set_conversation_status(conversation_id: str, status: ConversationStatus) -> None:
+    client = await get_client()
+    if client is None:
+        return
+    try:
+        await (
+            client.table("conversations")
+            .update({"status": str(status)})
+            .eq("conversation_id", conversation_id)
+            .execute()
+        )
+        log.info(
+            "conversation_status_set",
+            extra={"conversation_id": conversation_id, "status": str(status)},
+        )
+    except Exception:
+        log.exception("conversation_status_failed", extra={"conversation_id": conversation_id})
+
+
+# ---------------------------------------------------------------------------
+# messages
+# ---------------------------------------------------------------------------
+
+
+async def save_message(conversation_id: str, role: MessageRole, content: str) -> bool:
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        await (
+            client.table("messages")
+            .insert({"conversation_id": conversation_id, "role": str(role), "content": content})
+            .execute()
+        )
+        return True
+    except Exception:
+        log.exception(
+            "message_save_failed",
+            extra={"conversation_id": conversation_id, "role": str(role)},
+        )
+        return False
+
+
+async def get_history(conversation_id: str, limit: int | None = None) -> list[Message]:
+    """Last N messages in chronological order, ready for the LLM.
+
+    Fetched newest-first so the index is used, then reversed — the window we
+    want is the most recent, but the model needs oldest-first.
+    """
+    client = await get_client()
+    if client is None:
+        return []
+    limit = limit or settings.history_limit
+    try:
+        result = (
+            await client.table("messages")
+            .select("conversation_id, role, content, created_at")
+            .eq("conversation_id", conversation_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(result.data or []))
+        return [Message(**row) for row in rows]
+    except Exception:
+        log.exception("history_fetch_failed", extra={"conversation_id": conversation_id})
+        return []
+
+
+# ---------------------------------------------------------------------------
+# opt-out (BRD §13) — compliance-critical
+# ---------------------------------------------------------------------------
+
+
+async def record_opt_out(entry: OptOutEntry) -> bool:
+    """Honour an opt-out immediately: write the list entry and flip the
+    denormalised customer flag that outbound checks read."""
+    client = await get_client()
+    if client is None:
+        return False
+    payload = entry.model_dump(exclude_none=True)
+    try:
+        await (
+            client.table("opt_out_list")
+            .upsert(payload, on_conflict="channel,channel_user_id")
+            .execute()
+        )
+        await (
+            client.table("customers")
+            .update({"is_opted_out": True})
+            .eq("channel", str(entry.channel))
+            .eq("channel_user_id", entry.channel_user_id)
+            .execute()
+        )
+        log.info(
+            "opt_out_recorded",
+            extra={"channel": str(entry.channel), "conversation_id": entry.conversation_id},
+        )
+        return True
+    except Exception:
+        log.exception("opt_out_failed", extra={"channel": str(entry.channel)})
+        return False
+
+
+async def is_opted_out(channel: Channel, channel_user_id: str) -> bool:
+    """Checked before every outbound automated message.
+
+    Fails closed: if the check itself errors we report opted-out, because
+    messaging someone who asked us to stop is worse than missing a reply.
+    """
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        result = (
+            await client.table("opt_out_list")
+            .select("id")
+            .eq("channel", str(channel))
+            .eq("channel_user_id", channel_user_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception:
+        log.exception("opt_out_check_failed", extra={"channel": str(channel)})
+        return True
+
+
+# ---------------------------------------------------------------------------
+# lead scores (BRD §9, §11) — append-only
+# ---------------------------------------------------------------------------
+
+
+async def save_lead_score(score: LeadScore) -> bool:
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        await client.table("lead_scores").insert(score.model_dump(exclude_none=True)).execute()
+        log.info(
+            "lead_scored",
+            extra={
+                "conversation_id": score.conversation_id,
+                "score": score.score,
+                "category": str(score.category),
+            },
+        )
+        return True
+    except Exception:
+        log.exception("lead_score_save_failed", extra={"conversation_id": score.conversation_id})
+        return False
+
+
+async def get_ranked_leads(limit: int = 20, category: str | None = None) -> list[dict[str, Any]]:
+    """Top leads by current score (BRD §11). Reads the current_leads view, so
+    ranking is a query rather than a batch job."""
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        query = client.table("current_leads").select("*")
+        if category:
+            query = query.eq("category", category)
+        result = await query.order("score", desc=True).limit(limit).execute()
+        return result.data or []
+    except Exception:
+        log.exception("ranked_leads_failed")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# summaries (BRD §14)
+# ---------------------------------------------------------------------------
+
+
+async def upsert_summary(summary: ConversationSummary) -> bool:
+    client = await get_client()
+    if client is None:
+        return False
+    payload = summary.model_dump(exclude_none=True)
+    payload["updated_at"] = _now()
+    try:
+        await (
+            client.table("conversation_summaries")
+            .upsert(payload, on_conflict="conversation_id")
+            .execute()
+        )
+        log.info("summary_upserted", extra={"conversation_id": summary.conversation_id})
+        return True
+    except Exception:
+        log.exception("summary_upsert_failed", extra={"conversation_id": summary.conversation_id})
+        return False
+
+
+async def get_summary(conversation_id: str) -> dict[str, Any] | None:
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("conversation_summaries")
+            .select("*")
+            .eq("conversation_id", conversation_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("summary_fetch_failed", extra={"conversation_id": conversation_id})
+        return None
+
+
+# ---------------------------------------------------------------------------
+# handover (BRD §12)
+# ---------------------------------------------------------------------------
+
+
+async def save_handover(request: HandoverRequest) -> str | None:
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("handover_requests")
+            .insert(request.model_dump(exclude_none=True))
+            .execute()
+        )
+        handover_id = result.data[0]["id"] if result.data else None
+        log.info(
+            "handover_saved",
+            extra={
+                "conversation_id": request.conversation_id,
+                "reason": str(request.reason),
+                "handover_id": handover_id,
+            },
+        )
+        return handover_id
+    except Exception:
+        log.exception("handover_save_failed", extra={"conversation_id": request.conversation_id})
+        return None
+
+
+async def get_handover_queue(
+    status: HandoverStatus = HandoverStatus.PENDING, limit: int = 50
+) -> list[dict[str, Any]]:
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            await client.table("handover_requests")
+            .select("*")
+            .eq("status", str(status))
+            .order("notified_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        log.exception("handover_queue_failed")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# machines — catalog reads for recommendation (BRD §6, §7)
+# ---------------------------------------------------------------------------
+
+
+async def get_machine_by_code(machine_code: str) -> dict[str, Any] | None:
+    """Exact-match lookup. Complements vector search, which is weakest on
+    model numbers like VMC-850 — precisely what customers type."""
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("machines")
+            .select("*")
+            .ilike("machine_code", machine_code)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("machine_fetch_failed", extra={"machine_code": machine_code})
+        return None
+
+
+async def list_machines(category: str | None = None) -> list[dict[str, Any]]:
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        query = client.table("machines").select("*").eq("is_active", True)
+        if category:
+            query = query.eq("category", category)
+        result = await query.execute()
+        return result.data or []
+    except Exception:
+        log.exception("machine_list_failed")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# ai_logs — telemetry. Fire-and-forget: never awaited in a reply path.
+# ---------------------------------------------------------------------------
+
+
+async def log_ai_event(
+    conversation_id: str,
+    event_type: AiLogEvent,
+    *,
+    model: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    latency_ms: int | None = None,
+    retrieved_chunks: list[dict[str, Any]] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    client = await get_client()
+    if client is None:
+        return
+    row = {
+        "conversation_id": conversation_id,
+        "event_type": str(event_type),
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "latency_ms": latency_ms,
+        "retrieved_chunks": retrieved_chunks,
+        "payload": payload,
+    }
+    try:
+        await (
+            client.table("ai_logs")
+            .insert({k: v for k, v in row.items() if v is not None})
+            .execute()
+        )
+    except Exception:
+        log.exception("ai_log_failed", extra={"conversation_id": conversation_id})
+
+
+# ---------------------------------------------------------------------------
+# conversation bootstrap — one call per inbound turn
+# ---------------------------------------------------------------------------
+
+
+async def bootstrap_turn(
+    channel: Channel,
+    user_id: str,
+    conversation_id: str,
+    sender_name: str | None = None,
+    sender_phone: str | None = None,
+) -> str | None:
+    """Ensure customer and conversation rows exist for an inbound message.
+
+    Returns the customer id, or None if persistence is unavailable — callers
+    continue regardless, since a missing row must not block a reply.
+    """
+    customer_id = await upsert_customer(
+        Customer(
+            channel=channel,
+            channel_user_id=user_id,
+            name=sender_name,
+            phone=sender_phone,
+        )
+    )
+    await ensure_conversation(conversation_id, customer_id)
+    return customer_id

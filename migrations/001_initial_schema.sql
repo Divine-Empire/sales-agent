@@ -246,12 +246,17 @@ create table if not exists reports (
 -- ---------------------------------------------------------------------------
 -- updated_at maintenance
 -- ---------------------------------------------------------------------------
-create or replace function set_updated_at() returns trigger as $$
+-- search_path pinned: an unpinned function can be hijacked by a caller
+-- shadowing an object in an earlier schema.
+create or replace function set_updated_at() returns trigger
+    language plpgsql
+    set search_path = ''
+as $$
 begin
     new.updated_at = now();
     return new;
 end;
-$$ language plpgsql;
+$$;
 
 drop trigger if exists customers_updated_at on customers;
 create trigger customers_updated_at before update on customers
@@ -289,3 +294,7 @@ from lead_scores ls
 left join customers c on c.id = ls.customer_id
 left join conversations conv on conv.conversation_id = ls.conversation_id
 order by ls.conversation_id, ls.scored_at desc;
+
+-- Views default to definer semantics and would bypass the caller's RLS. This
+-- view joins customer PII onto lead scores, so it must run as the invoker.
+alter view current_leads set (security_invoker = on);

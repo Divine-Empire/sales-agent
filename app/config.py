@@ -1,7 +1,9 @@
 """Environment-backed configuration. Never hardcode secrets — everything comes from .env."""
 
 from functools import lru_cache
+from typing import Any
 
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +31,7 @@ class Settings(BaseSettings):
     # Supabase
     supabase_url: str = ""
     supabase_service_key: str = ""
+    supabase_timeout_seconds: float = 10.0
     history_limit: int = 20
 
     # Telegram
@@ -41,6 +44,21 @@ class Settings(BaseSettings):
     port: int = 10000
     log_level: str = "INFO"
     render_external_url: str = ""
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_uses_default(cls, value: Any, info: ValidationInfo) -> Any:
+        """An empty env var means "unset", not "invalid".
+
+        `PORT=` in a .env is normal — Render injects the real value at runtime.
+        Refusing to boot over a blank line is a worse failure than defaulting.
+        Only applies to non-string fields; a blank string stays a blank string.
+        """
+        if isinstance(value, str) and not value.strip() and info.field_name:
+            field = cls.model_fields[info.field_name]
+            if field.annotation is not str:
+                return field.get_default(call_default_factory=True)
+        return value
 
     @property
     def telegram_api_base(self) -> str:
