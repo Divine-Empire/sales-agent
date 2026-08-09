@@ -107,6 +107,18 @@ GST registered. Payment by NEFT/RTGS/IMPS, cheque/DD or cash.
 Domestic (India) supply only.
 """
 
+# Tappable suggestions shown above the input box (Telegram reply keyboard).
+# An empty chat is where sales conversations die — a customer who has to invent
+# an opening question often just leaves. Each of these is a real catalog query
+# that returns a concrete answer; a suggestion that leads to "I don't have that"
+# would be worse than none.
+QUICK_REPLIES = [
+    ["🏗️ Bar bending machine", "🛣️ Road roller"],
+    ["📐 Total station", "🧪 Lab equipment"],
+    ["🦺 Safety items", "📞 Talk to sales"],
+]
+
+
 # Commands deliberately routed to the agent instead of answered from a constant.
 # /stop must reach record_opt_out so the opt-out is persisted and enforced —
 # a canned "you've been unsubscribed" that writes nothing is a compliance lie.

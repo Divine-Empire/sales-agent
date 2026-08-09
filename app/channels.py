@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from app import commands
 from app.config import settings
 from app.enums import Channel
 from app.logging_config import get_logger
@@ -119,18 +120,35 @@ class TelegramAdapter(ChannelAdapter):
             },
         )
 
-    async def send(self, message: OutgoingMessage) -> bool:
-        """Send a reply, splitting anything over the platform limit."""
+    async def send(self, message: OutgoingMessage, keyboard: bool = False) -> bool:
+        """Send a reply, splitting anything over the platform limit.
+
+        `keyboard` attaches the quick-reply suggestions above the input box.
+        Only the last chunk carries it, or a split message would flash the
+        keyboard several times.
+        """
         if not self.token:
             log.error("telegram_not_configured")
             return False
         chunks = split_message(message.text)
+        markup = (
+            {
+                "keyboard": [[{"text": t} for t in row] for row in commands.QUICK_REPLIES],
+                "resize_keyboard": True,
+                "is_persistent": True,
+            }
+            if keyboard
+            else None
+        )
         try:
             async with httpx.AsyncClient(timeout=settings.telegram_timeout_seconds) as client:
-                for chunk in chunks:
+                for index, chunk in enumerate(chunks):
+                    payload: dict[str, Any] = {"chat_id": message.user_id, "text": chunk}
+                    if markup and index == len(chunks) - 1:
+                        payload["reply_markup"] = markup
                     response = await client.post(
                         f"{self.api_base}/sendMessage",
-                        json={"chat_id": message.user_id, "text": chunk},
+                        json=payload,
                     )
                     if response.status_code != 200:
                         log.error(
