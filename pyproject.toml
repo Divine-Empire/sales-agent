@@ -31,6 +31,9 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # The system prompt is prose. Wrapping it to 100 cols to satisfy a linter would
 # make the single most important text in the repo harder to read and review.
 "app/prompts.py" = ["E501"]
+# Customer-facing message text — same reasoning. These strings are read as they
+# appear in a chat window, so they are written that way.
+"app/commands.py" = ["E501"]
 
 [tool.uv]
 package = false

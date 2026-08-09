@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app import prompts, rag, store
+from app import commands, prompts, rag, store
 from app.enums import (
     AiLogEvent,
     ConversationStatus,
@@ -345,6 +345,17 @@ async def handle_message(message: IncomingMessage) -> AgentReply:
     ctx = ToolContext(message, customer_id)
 
     await store.save_message(conversation_id, MessageRole.USER, message.text)
+
+    # Slash commands answer from constants — instant, identical every time, and
+    # no LLM cost. /stop deliberately falls through so opt-out is persisted.
+    canned = commands.handle_command(message.text)
+    if canned is not None:
+        await store.save_message(conversation_id, MessageRole.ASSISTANT, canned)
+        log.info(
+            "command_handled",
+            extra={"conversation_id": conversation_id, "command": message.text.split()[0]},
+        )
+        return AgentReply(text=canned, model="command")
 
     # Retrieval failure is not fatal — answer without context and log it.
     chunks = await rag.search(message.text, conversation_id=conversation_id)
