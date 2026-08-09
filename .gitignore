@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project docs — source BRD and generated plans, kept local
+docs/
