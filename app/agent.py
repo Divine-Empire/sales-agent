@@ -344,6 +344,14 @@ async def handle_message(message: IncomingMessage) -> AgentReply:
     )
     ctx = ToolContext(message, customer_id)
 
+    # /clear wipes history, so it runs before this turn is written — otherwise
+    # the confirmation would be deleted along with everything else.
+    if commands.parse_command(message.text) == "/clear":
+        await store.clear_history(conversation_id)
+        await store.save_message(conversation_id, MessageRole.ASSISTANT, commands.CLEARED_MESSAGE)
+        log.info("command_handled", extra={"conversation_id": conversation_id, "command": "/clear"})
+        return AgentReply(text=commands.CLEARED_MESSAGE, model="command")
+
     await store.save_message(conversation_id, MessageRole.USER, message.text)
 
     # Slash commands answer from constants — instant, identical every time, and

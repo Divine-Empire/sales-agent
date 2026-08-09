@@ -67,6 +67,7 @@ Monday–Sunday, 9:30 AM – 6:30 PM
 /start — start over
 /products — what we supply
 /contact — sales team details
+/clear — clear our conversation and start fresh
 /stop — stop receiving messages
 
 You can write in English, Hindi or Hinglish.
@@ -79,6 +80,13 @@ PRODUCTS_MESSAGE = f"""What we supply 🏗️
 We stock brands including Sokkia, Wacker Neuson, Fischer, Bosch, Sika and our own ManiQuip and Divine ranges.
 
 Tell me your project type and I'll suggest what fits — for example "RCC building site", "road work", or "new testing lab".
+"""
+
+CLEARED_MESSAGE = """Conversation cleared 🧹
+
+I've forgotten what we discussed. Starting fresh — what are you looking for?
+
+Your enquiry details stay with our sales team, so nothing you asked for is lost.
 """
 
 CONTACT_MESSAGE = f"""Divine Empire India Pvt. Ltd. 📍
@@ -104,6 +112,10 @@ Domestic (India) supply only.
 # a canned "you've been unsubscribed" that writes nothing is a compliance lie.
 PASS_THROUGH_COMMANDS = {"/stop"}
 
+# Commands with a side effect the agent performs before replying. Handled in
+# agent.handle_message rather than here, since this module stays pure.
+STATEFUL_COMMANDS = {"/clear"}
+
 COMMAND_RESPONSES = {
     "/start": START_MESSAGE,
     "/help": HELP_MESSAGE,
@@ -116,6 +128,7 @@ BOTFATHER_COMMANDS = """start - Start a conversation
 help - What I can help you with
 products - What we supply
 contact - Sales team contact details
+clear - Clear the conversation and start fresh
 stop - Stop receiving messages"""
 
 
@@ -128,6 +141,14 @@ def handle_command(text: str) -> str | None:
     if not stripped.startswith("/"):
         return None
     command = stripped.split()[0].split("@")[0].lower()
-    if command in PASS_THROUGH_COMMANDS:
+    if command in PASS_THROUGH_COMMANDS or command in STATEFUL_COMMANDS:
         return None
     return COMMAND_RESPONSES.get(command)
+
+
+def parse_command(text: str) -> str | None:
+    """Return the normalised command name, or None if this is not a command."""
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return None
+    return stripped.split()[0].split("@")[0].lower()

@@ -199,6 +199,26 @@ async def save_message(conversation_id: str, role: MessageRole, content: str) ->
         return False
 
 
+async def clear_history(conversation_id: str) -> bool:
+    """Delete the conversation's message history so the agent starts fresh.
+
+    Deliberately narrow: messages only. Leads, summaries, handovers, opt-outs
+    and telemetry all survive. A customer tidying their chat is not withdrawing
+    consent and must not silently destroy a captured lead — and an opt-out that
+    disappeared here would be a compliance failure.
+    """
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        await client.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        log.info("history_cleared", extra={"conversation_id": conversation_id})
+        return True
+    except Exception:
+        log.exception("history_clear_failed", extra={"conversation_id": conversation_id})
+        return False
+
+
 async def get_history(conversation_id: str, limit: int | None = None) -> list[Message]:
     """Last N messages in chronological order, ready for the LLM.
 
