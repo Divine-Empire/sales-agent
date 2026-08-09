@@ -206,6 +206,7 @@ docker build -t sales-agent .     # verify the image builds
 | `app/prompts.py` | The system prompt — treat changes as code |
 | `app/agent.py` | Agent core, three tools, capped loop |
 | `app/commands.py` | Slash commands answered without an LLM call |
+| `app/intelligence.py` | Post-reply scoring, intent, summaries |
 | `app/channels.py` | Telegram adapter, WhatsApp stub |
 | `app/main.py` | FastAPI routes |
 
@@ -220,6 +221,8 @@ docker build -t sales-agent .     # verify the image builds
 **`save_lead` rejects placeholder values.** The model fills required fields rather than skipping the call, which produced real leads reading "Unknown | Unknown" during testing. It now returns an error telling the model to ask.
 
 **`/clear` deletes messages only.** Leads, summaries, handovers and opt-outs survive. A customer tidying their chat is not withdrawing an enquiry, and a dropped opt-out would be a compliance failure.
+
+**Scoring runs after the reply.** It is an LLM call the customer never sees; inline it would add seconds to every turn. Scores are appended, never updated, so ranking movement stays auditable.
 
 **Retrieval failure is never fatal.** Empty or low-scoring results mean the agent says it will check with the team instead of inventing a specification.
 
@@ -250,14 +253,13 @@ Nothing else changes. Store, agent, RAG, scoring and reporting already work off 
 | 9 — Channels | Done |
 | 10 — API | Done |
 | 11 — Deployment | Done |
-| **8 — Lead scoring, intent, summaries** | **Not built** |
+| 8 — Lead scoring, intent, summaries | Done |
 
-Until phase 8 lands, `/api/leads` returns empty: it reads `lead_scores`, and nothing writes to that table yet. Leads are still captured — see `/api/conversations/{id}` or the `conversation_summaries` table.
+All BRD capabilities are implemented except the dashboard UI, which is a separate project.
 
 ### Known gaps
 
 - `/api/*` routes are unauthenticated (see above)
-- Lead scoring, intent classification and conversation summaries (BRD §9–§11, §14) are not implemented
 - The dashboard UI is a separate project; this repo provides the API behind it
 - Catalog prices are approximate public listings — the agent is instructed to say so and to offer a callback for exact pricing
 - Hybrid dense+sparse retrieval is the upgrade path for model-number queries; dense-only is adequate at this catalog size
