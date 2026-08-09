@@ -1,0 +1,31 @@
+[project]
+name = "sales-agent"
+version = "0.1.0"
+description = "AI sales agent for an industrial machinery supplier (Telegram demo, WhatsApp-ready)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.2",
+    "openai>=1.55.0",
+    "qdrant-client>=1.12.0",
+    "supabase>=2.10.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.uv]
+package = false
