@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app import prompts, store
+from app import intelligence, prompts, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
@@ -90,6 +90,12 @@ async def _process(update: dict[str, Any]) -> None:
         await telegram.send_chat_action(incoming.user_id)
         reply = await handle_message(incoming)
         await _deliver(reply, incoming.user_id, incoming.conversation_id)
+
+        # Scoring, intent and summary (BRD §9-§11, §14) run only after the
+        # customer has their reply — they are an LLM call the customer never
+        # sees, and inline they would add seconds to every turn.
+        if reply.model != "command":
+            await intelligence.analyse(incoming.conversation_id)
     except Exception:
         log.exception(
             "webhook_processing_failed",

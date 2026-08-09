@@ -34,6 +34,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 # Customer-facing message text — same reasoning. These strings are read as they
 # appear in a chat window, so they are written that way.
 "app/commands.py" = ["E501"]
+# Contains the analysis prompt — prose, reviewed as prose.
+"app/intelligence.py" = ["E501"]
 
 [tool.uv]
 package = false
