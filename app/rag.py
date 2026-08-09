@@ -34,7 +34,9 @@ log = get_logger(__name__)
 VECTOR_SIZE = 1536
 DISTANCE = models.Distance.COSINE
 
-KNOWLEDGE_BASE = Path("docs/divine_empire_knowledge_base.md")
+# Lives in data/, not docs/: the app reads this at ingestion time, so it is
+# operational data that must ship in the image — docs/ is gitignored.
+KNOWLEDGE_BASE = Path("data/knowledge_base.md")
 
 _client: AsyncQdrantClient | None = None
 

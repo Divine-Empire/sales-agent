@@ -8,6 +8,7 @@ __pycache__
 .env.*
 !.env.example
 docs/
+migrations/
 README.md
 .ruff_cache
 .pytest_cache
