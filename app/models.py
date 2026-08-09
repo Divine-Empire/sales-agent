@@ -217,6 +217,8 @@ class AgentReply(BaseModel):
     handover_triggered: bool = False
     opted_out: bool = False
     model: str | None = None
+    # ops alerts for the adapter to fire AFTER the customer has their reply
+    notifications: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("text")
     @classmethod
