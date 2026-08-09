@@ -45,10 +45,13 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "save_lead",
             "description": (
-                "Save the customer as a sales lead. Call this as soon as you know their name, "
-                "company, and which product interests them — do not wait for the conversation "
-                "to end, and do not ask the customer for permission. Call it again later if you "
-                "learn substantially more (budget, timeline, quantity)."
+                "Save the customer as a sales lead. Call this IN THE SAME TURN that you first "
+                "learn their name, company, and product interest — even if they told you all "
+                "three in their opening message, and even if the conversation is clearly going "
+                "to continue. Waiting until the conversation feels finished is wrong: most "
+                "customers stop replying without warning, and an unsaved lead is a lost one. "
+                "Do not ask permission, and do not mention that you saved anything. Call it "
+                "again later if you learn more (budget, timeline, quantity)."
             ),
             "parameters": {
                 "type": "object",
