@@ -136,6 +136,16 @@ async def telegram_webhook(
         log.warning("webhook_bad_json")
         return JSONResponse({"ok": True})
 
+    # Record every chat the bot is spoken to in, so group ids are discoverable
+    # via /admin/telegram/chats.
+    chat = ((update.get("message") or update.get("my_chat_member") or {}).get("chat")) or {}
+    if chat.get("id") is not None:
+        SEEN_CHATS[str(chat["id"])] = {
+            "chat_id": chat["id"],
+            "type": chat.get("type"),
+            "title": chat.get("title") or chat.get("first_name"),
+        }
+
     # Fire-and-forget: hold a reference so the task is not garbage collected.
     task = asyncio.create_task(_process(update))
     _background.add(task)
@@ -159,6 +169,18 @@ async def set_webhook(url: str | None = None) -> dict[str, Any]:
 async def telegram_info() -> dict[str, Any]:
     """Bot identity — a quick way to confirm the token is live."""
     return await telegram.get_me()
+
+
+# Chats the bot has seen, newest first. Populated by the webhook, so any group
+# the bot is in shows up here after one message — which is how you find the
+# group id for OPS_CHAT_ID without adding a third-party bot to a channel that
+# will carry customer PII.
+SEEN_CHATS: dict[str, dict[str, Any]] = {}
+
+
+@app.get("/admin/telegram/chats")
+async def telegram_chats() -> dict[str, Any]:
+    return {"count": len(SEEN_CHATS), "chats": list(SEEN_CHATS.values())}
 
 
 # ---------------------------------------------------------------------------
