@@ -11,6 +11,7 @@ abstraction we cannot debug live during a client demo.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -40,6 +41,26 @@ class ChannelAdapter(ABC):
     @abstractmethod
     async def send(self, message: OutgoingMessage) -> bool:
         """Deliver a reply. Returns False on failure rather than raising."""
+
+
+def to_telegram_html(text: str) -> str:
+    """Render model output as Telegram HTML.
+
+    HTML rather than MarkdownV2 on purpose: MarkdownV2 requires escaping
+    eighteen characters, and model output will eventually contain an unescaped
+    '.' or '-' that makes Telegram reject the entire message. HTML needs three.
+
+    Escaping happens first, so any '<' the model wrote is inert before we add
+    tags of our own. Only **bold** is converted — that is the one marker the
+    model actually emits, and every tag we do not create is a tag that cannot
+    be malformed. `send()` falls back to plain text if Telegram still objects.
+    """
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # **bold** and *bold* -> <b>. Non-greedy, single-line, so an unmatched
+    # asterisk is left as literal text rather than swallowing the message.
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)", r"<b>\1</b>", escaped)
+    return escaped
 
 
 def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
@@ -143,13 +164,27 @@ class TelegramAdapter(ChannelAdapter):
         try:
             async with httpx.AsyncClient(timeout=settings.telegram_timeout_seconds) as client:
                 for index, chunk in enumerate(chunks):
-                    payload: dict[str, Any] = {"chat_id": message.user_id, "text": chunk}
+                    payload: dict[str, Any] = {
+                        "chat_id": message.user_id,
+                        "text": to_telegram_html(chunk),
+                        "parse_mode": "HTML",
+                    }
                     if markup and index == len(chunks) - 1:
                         payload["reply_markup"] = markup
                     response = await client.post(
                         f"{self.api_base}/sendMessage",
                         json=payload,
                     )
+                    if response.status_code == 400:
+                        # Formatting was rejected. A message must never be lost
+                        # to a stray tag — resend it as plain text.
+                        log.warning(
+                            "telegram_html_rejected",
+                            extra={"conversation_id": message.conversation_id},
+                        )
+                        payload["text"] = chunk
+                        payload.pop("parse_mode", None)
+                        response = await client.post(f"{self.api_base}/sendMessage", json=payload)
                     if response.status_code != 200:
                         log.error(
                             "telegram_send_failed",

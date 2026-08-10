@@ -112,7 +112,13 @@ async def complete(
     must catch it and still reply to the user — silence reads as broken.
     """
     temperature = settings.llm_temperature if temperature is None else temperature
-    kwargs: dict[str, Any] = {"messages": messages, "temperature": temperature}
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "temperature": temperature,
+        # Latency scales with output length far more than input. The prompt
+        # asks for short replies; this is the guardrail for when it does not.
+        "max_completion_tokens": settings.llm_max_output_tokens,
+    }
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"

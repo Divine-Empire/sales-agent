@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     llm_timeout_seconds: float = 30.0
     llm_temperature: float = 0.3
+    llm_max_output_tokens: int = 600
 
     # Qdrant
     qdrant_url: str = ""
@@ -39,6 +40,9 @@ class Settings(BaseSettings):
     ops_chat_id: str = ""
     telegram_webhook_secret: str = ""
     telegram_timeout_seconds: float = 10.0
+
+    # Dashboard API
+    dashboard_api_key: str = ""
 
     # Runtime
     port: int = 10000

@@ -464,6 +464,106 @@ async def get_machine_by_code(machine_code: str) -> dict[str, Any] | None:
         return None
 
 
+async def upsert_machine(
+    *,
+    machine_code: str,
+    name: str,
+    category: str,
+    description: str | None = None,
+    price_range: str | None = None,
+    lead_time: str | None = None,
+    specifications: dict[str, Any] | None = None,
+) -> str | None:
+    """Insert or update a catalog entry by machine_code."""
+    client = await get_client()
+    if client is None:
+        return None
+    payload = {
+        "machine_code": machine_code,
+        "name": name,
+        "category": category,
+        "description": description,
+        "price_range": price_range,
+        "lead_time": lead_time,
+        "specifications": specifications or {},
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+    try:
+        result = (
+            await client.table("machines").upsert(payload, on_conflict="machine_code").execute()
+        )
+        machine_id = result.data[0]["id"] if result.data else None
+        log.info("machine_upserted", extra={"machine_code": machine_code, "id": machine_id})
+        return machine_id
+    except Exception:
+        log.exception("machine_upsert_failed", extra={"machine_code": machine_code})
+        return None
+
+
+async def save_machine_document(
+    *,
+    machine_id: str | None,
+    doc_type: Any,
+    title: str,
+    content: str,
+    source_url: str | None = None,
+) -> str | None:
+    """Store extracted document text. Keeping it in Postgres means re-embedding
+    never requires re-parsing the original file."""
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("machine_documents")
+            .insert(
+                {
+                    "machine_id": machine_id,
+                    "doc_type": str(doc_type),
+                    "title": title,
+                    "content": content,
+                    "source_url": source_url,
+                    "indexed_at": _now(),
+                }
+            )
+            .execute()
+        )
+        return result.data[0]["id"] if result.data else None
+    except Exception:
+        log.exception("machine_document_save_failed", extra={"machine_id": machine_id})
+        return None
+
+
+async def delete_machine(machine_id: str) -> bool:
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        await client.table("machines").delete().eq("id", machine_id).execute()
+        log.info("machine_deleted", extra={"machine_id": machine_id})
+        return True
+    except Exception:
+        log.exception("machine_delete_failed", extra={"machine_id": machine_id})
+        return False
+
+
+async def list_machine_documents(machine_id: str | None = None) -> list[dict[str, Any]]:
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        query = client.table("machine_documents").select(
+            "id, machine_id, doc_type, title, indexed_at, created_at"
+        )
+        if machine_id:
+            query = query.eq("machine_id", machine_id)
+        result = await query.order("created_at", desc=True).execute()
+        return result.data or []
+    except Exception:
+        log.exception("machine_documents_list_failed")
+        return []
+
+
 async def list_machines(category: str | None = None) -> list[dict[str, Any]]:
     client = await get_client()
     if client is None:
@@ -521,6 +621,113 @@ async def log_ai_event(
 # ---------------------------------------------------------------------------
 # conversation bootstrap — one call per inbound turn
 # ---------------------------------------------------------------------------
+
+
+async def list_customers(limit: int = 200) -> list[dict[str, Any]]:
+    """Customer management (BRD §16)."""
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            await client.table("customers")
+            .select("*")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        log.exception("customers_list_failed")
+        return []
+
+
+async def list_opt_outs(limit: int = 200) -> list[dict[str, Any]]:
+    """Opt-out management (BRD §13, §16)."""
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            await client.table("opt_out_list")
+            .select("*")
+            .order("opted_out_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        log.exception("opt_outs_list_failed")
+        return []
+
+
+async def list_summaries(limit: int = 200) -> list[dict[str, Any]]:
+    """Conversation summaries — the source for machine-interest analytics."""
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        result = (
+            await client.table("conversation_summaries")
+            .select("*")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        log.exception("summaries_list_failed")
+        return []
+
+
+async def list_ai_logs(
+    conversation_id: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    """AI conversation logs (BRD §16) — model, tokens, latency per turn."""
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        query = client.table("ai_logs").select("*")
+        if conversation_id:
+            query = query.eq("conversation_id", conversation_id)
+        result = await query.order("created_at", desc=True).limit(limit).execute()
+        return result.data or []
+    except Exception:
+        log.exception("ai_logs_list_failed")
+        return []
+
+
+async def update_handover_status(handover_id: str, status: Any) -> bool:
+    """Let a rep acknowledge or resolve a handover from the dashboard."""
+    client = await get_client()
+    if client is None:
+        return False
+    payload: dict[str, Any] = {"status": str(status)}
+    if str(status) == "resolved":
+        payload["resolved_at"] = _now()
+    try:
+        await client.table("handover_requests").update(payload).eq("id", handover_id).execute()
+        log.info(
+            "handover_status_updated",
+            extra={"handover_id": handover_id, "status": str(status)},
+        )
+        return True
+    except Exception:
+        log.exception("handover_update_failed", extra={"handover_id": handover_id})
+        return False
+
+
+async def count_conversations() -> int:
+    client = await get_client()
+    if client is None:
+        return 0
+    try:
+        result = await client.table("conversations").select("id", count="exact").execute()
+        return result.count or 0
+    except Exception:
+        log.exception("conversation_count_failed")
+        return 0
 
 
 async def bootstrap_turn(

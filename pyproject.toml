@@ -13,6 +13,9 @@ dependencies = [
     "supabase>=2.10.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
+    "pypdf>=6.15.0",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]
@@ -36,6 +39,8 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 "app/commands.py" = ["E501"]
 # Contains the analysis prompt — prose, reviewed as prose.
 "app/intelligence.py" = ["E501"]
+# FastAPI declares multipart params as File(...)/Form(...) defaults by design.
+"app/main.py" = ["B008"]
 
 [tool.uv]
 package = false

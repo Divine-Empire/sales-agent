@@ -14,14 +14,24 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 
-from app import intelligence, prompts, store
+from app import analytics, documents, intelligence, prompts, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
-from app.enums import Channel, HandoverStatus
+from app.enums import Channel, DocumentType, HandoverStatus
 from app.logging_config import get_logger, setup_logging
 from app.models import OutgoingMessage
 
@@ -184,14 +194,30 @@ async def telegram_chats() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Read API — backs the dashboard and reports (BRD §15, §16)
+# Dashboard API (BRD §15, §16)
 #
-# UNAUTHENTICATED. These expose customer PII and lead data and must not reach a
-# public deployment without auth. Tracked as the largest known gap in
-# docs/build-plan.md.
+# Authenticated with a shared secret in X-API-Key. These return customer PII —
+# names, companies, budgets, full transcripts — so the key is required whenever
+# DASHBOARD_API_KEY is configured. The dashboard calls them server-side only,
+# so the key never reaches a browser.
 # ---------------------------------------------------------------------------
 
-api = APIRouter(prefix="/api", tags=["dashboard"])
+
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Reject unauthenticated dashboard requests.
+
+    When no key is configured the API stays open — that keeps local development
+    frictionless, and the deployment sets the key. Startup logs loudly if it is
+    missing so an unprotected production deploy is visible.
+    """
+    if not settings.dashboard_api_key:
+        return
+    if x_api_key != settings.dashboard_api_key:
+        log.warning("api_unauthorised")
+        raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+
+
+api = APIRouter(prefix="/api", tags=["dashboard"], dependencies=[Depends(require_api_key)])
 
 
 @api.get("/leads")
@@ -217,6 +243,151 @@ async def conversation(conversation_id: str) -> dict[str, Any]:
         "summary": await store.get_summary(conversation_id),
         "messages": [m.model_dump(mode="json") for m in messages],
     }
+
+
+@api.get("/overview")
+async def overview() -> dict[str, Any]:
+    """Everything the dashboard landing page needs, in one round trip."""
+    return await analytics.overview()
+
+
+@api.get("/reports/{report_type}")
+async def report(report_type: str) -> dict[str, Any]:
+    """Daily, weekly or monthly aggregate (BRD §15)."""
+    return await analytics.report(report_type)
+
+
+@api.get("/customers")
+async def customers(limit: int = 200) -> dict[str, Any]:
+    rows = await store.list_customers(limit=limit)
+    return {"count": len(rows), "customers": rows}
+
+
+@api.get("/opt-outs")
+async def opt_outs(limit: int = 200) -> dict[str, Any]:
+    """BRD §13 — who asked not to be contacted, and when."""
+    rows = await store.list_opt_outs(limit=limit)
+    return {"count": len(rows), "opt_outs": rows}
+
+
+@api.get("/summaries")
+async def summaries(limit: int = 200) -> dict[str, Any]:
+    rows = await store.list_summaries(limit=limit)
+    return {"count": len(rows), "summaries": rows}
+
+
+@api.get("/logs")
+async def ai_logs(conversation_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+    """AI conversation logs (BRD §16) — model, tokens, latency, retrieval."""
+    rows = await store.list_ai_logs(conversation_id=conversation_id, limit=limit)
+    return {"count": len(rows), "logs": rows}
+
+
+@api.patch("/handovers/{handover_id}")
+async def update_handover(handover_id: str, status: HandoverStatus) -> dict[str, Any]:
+    """Let a rep acknowledge or resolve a handover from the dashboard."""
+    ok = await store.update_handover_status(handover_id, status)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not update handover")
+    return {"id": handover_id, "status": str(status)}
+
+
+# ---------------------------------------------------------------------------
+# Catalog management — how the client adds machines without a developer
+# ---------------------------------------------------------------------------
+
+
+@api.get("/machines")
+async def machines(category: str | None = None) -> dict[str, Any]:
+    rows = await store.list_machines(category=category)
+    return {"count": len(rows), "machines": rows}
+
+
+@api.get("/machines/documents")
+async def machine_documents(machine_id: str | None = None) -> dict[str, Any]:
+    rows = await store.list_machine_documents(machine_id=machine_id)
+    return {"count": len(rows), "documents": rows}
+
+
+@api.post("/machines/upload")
+async def upload_machine_document(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    category: str = Form(...),
+    machine_code: str | None = Form(default=None),
+    description: str | None = Form(default=None),
+    price_range: str | None = Form(default=None),
+    lead_time: str | None = Form(default=None),
+    doc_type: DocumentType = Form(default=DocumentType.BROCHURE),
+) -> dict[str, Any]:
+    """Upload a brochure or spec sheet and make the machine answerable in chat.
+
+    Extracts text, stores the machine and document, then chunks and embeds into
+    Qdrant. The agent can answer questions about it immediately afterwards.
+    """
+    data = await file.read()
+    try:
+        result = await documents.add_machine_from_document(
+            name=name,
+            category=category,
+            data=data,
+            filename=file.filename or "upload",
+            content_type=file.content_type,
+            machine_code=machine_code,
+            description=description,
+            price_range=price_range,
+            lead_time=lead_time,
+            doc_type=doc_type,
+        )
+    except documents.ExtractionError as exc:
+        # These messages are written to be shown to a user, not swallowed.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("upload_failed", extra={"filename": file.filename})
+        raise HTTPException(status_code=500, detail="upload failed") from exc
+    return result
+
+
+@api.post("/machines/text")
+async def add_machine_from_text(
+    name: str = Form(...),
+    category: str = Form(...),
+    text: str = Form(...),
+    machine_code: str | None = Form(default=None),
+    price_range: str | None = Form(default=None),
+) -> dict[str, Any]:
+    """Add a machine by pasting its specifications — the fallback when a PDF is
+    a scan, which text extraction cannot read."""
+    machine_id = await store.upsert_machine(
+        machine_code=machine_code or name.upper().replace(" ", "-")[:40],
+        name=name,
+        category=category,
+        price_range=price_range,
+    )
+    await store.save_machine_document(
+        machine_id=machine_id,
+        doc_type=DocumentType.SPEC_SHEET,
+        title=f"{name} (pasted)",
+        content=text,
+    )
+    result = await documents.ingest_document(
+        machine_name=name,
+        category=category,
+        text=text,
+        machine_code=machine_code,
+        machine_id=machine_id,
+        price_range=price_range,
+        source_filename="pasted",
+    )
+    return {"machine_id": machine_id, "name": name, **result}
+
+
+@api.delete("/machines/{machine_id}")
+async def delete_machine(machine_id: str) -> dict[str, Any]:
+    ok = await store.delete_machine(machine_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not delete machine")
+    return {"id": machine_id, "deleted": True}
 
 
 app.include_router(api)
