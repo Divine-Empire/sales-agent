@@ -219,7 +219,12 @@ async def _handle_save_lead(args: dict[str, Any], ctx: ToolContext) -> str:
             )
         )
     ctx.lead_saved = True
-    ctx.notifications.append({"type": "lead", "data": args})
+    # Filter placeholders out of the ops alert too, not just the stored row.
+    # A rep reading "Location: unknown" learns nothing the omission would not
+    # have told them, and it makes the alert look like it malfunctioned.
+    ctx.notifications.append(
+        {"type": "lead", "data": {k: v for k, v in args.items() if _real_value(v)}}
+    )
     log.info(
         "tool_save_lead",
         extra={
