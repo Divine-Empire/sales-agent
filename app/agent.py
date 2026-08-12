@@ -89,10 +89,18 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "request_human_handoff",
             "description": (
-                "Escalate to the human sales team. Call this when the customer asks for a formal "
-                "quotation, wants to negotiate price, needs a bulk or multi-unit order, asks to "
-                "speak to a person, or asks something you cannot answer from the product context. "
-                "Always call it rather than guessing at a commercial commitment."
+                "Notify the sales team about a specific commercial request: a formal quotation, "
+                "price negotiation, a bulk or multi-unit order, an explicit ask to speak to a "
+                "person, or a question you genuinely cannot answer from the product context. "
+                "Call it once for that request, then KEEP TALKING to the customer yourself — "
+                "this notifies the team in the background, it does not end the conversation or "
+                "hand control away from you. Simply mentioning another product afterward is NOT "
+                "a new commercial request — answer normally from the product context, with a "
+                "regular price like any other question. Only call this again if the customer "
+                "explicitly asks for a formal quote, negotiates price, or places a bulk order on "
+                "a DIFFERENT product than the one already escalated. Never guess at a price, "
+                "discount, or delivery date yourself — that is what makes this necessary — but "
+                "everything else about the conversation is still your job."
             ),
             "parameters": {
                 "type": "object",
@@ -253,7 +261,6 @@ async def _handle_handoff(args: dict[str, Any], ctx: ToolContext) -> str:
             context=context,
         )
     )
-    await store.set_conversation_status(ctx.conversation_id, ConversationStatus.HANDED_OVER)
     ctx.handover_triggered = True
     ctx.handover_context = context
     ctx.notifications.append({"type": "handoff", "reason": reason.value, "context": context})
@@ -261,12 +268,17 @@ async def _handle_handoff(args: dict[str, Any], ctx: ToolContext) -> str:
         "tool_handoff",
         extra={"conversation_id": ctx.conversation_id, "reason": reason.value},
     )
-    # Give the model the contact block so it delivers them in its own words.
+    # Deliberately does NOT instruct the model to recite contact details — that
+    # phrasing was what caused the model to answer every subsequent message
+    # with only a contact card, as if the handoff had ended the conversation.
+    # It has not: this is a background notification to the sales team, and the
+    # model should keep selling. If the customer separately asks how to reach
+    # a person, that is a normal question to answer, not a scripted response.
     return (
-        "Handoff recorded and the sales team has been notified. "
-        f"Share these contact details with the customer: {prompts.SALES_PHONE}, "
-        f"WhatsApp {prompts.WHATSAPP_NUMBER}, {prompts.WEBSITE}. "
-        "Available Monday to Sunday, 9:30 AM to 6:30 PM."
+        "The sales team has been notified about this specific request and will follow up "
+        "with exact pricing. Continue the conversation normally — keep answering questions, "
+        "recommending products, and helping them. Do not repeat this notification or mention "
+        "contact details unless the customer asks how to reach someone directly."
     )
 
 
