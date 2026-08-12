@@ -105,6 +105,27 @@ async def upsert_customer(customer: Customer) -> str | None:
         return None
 
 
+async def update_customer_fields(customer_id: str, fields: dict[str, Any]) -> bool:
+    """Edit a customer's own fields from the dashboard (name, company, etc).
+
+    Unlike upsert_customer, this targets a known row by id — a rep editing a
+    lead already has the id, not a (channel, channel_user_id) pair.
+    """
+    client = await get_client()
+    if client is None:
+        return False
+    payload = {k: v for k, v in fields.items() if v is not None}
+    if not payload:
+        return True
+    try:
+        await client.table("customers").update(payload).eq("id", customer_id).execute()
+        log.info("customer_fields_updated", extra={"customer_id": customer_id})
+        return True
+    except Exception:
+        log.exception("customer_update_failed", extra={"customer_id": customer_id})
+        return False
+
+
 async def get_customer(channel: Channel, channel_user_id: str) -> dict[str, Any] | None:
     client = await get_client()
     if client is None:

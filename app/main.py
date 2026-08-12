@@ -26,14 +26,15 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app import analytics, documents, intelligence, prompts, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
-from app.enums import Channel, DocumentType, HandoverStatus
+from app.enums import Channel, DocumentType, HandoverStatus, LeadCategory
 from app.logging_config import get_logger, setup_logging
-from app.models import OutgoingMessage
+from app.models import LeadScore, OutgoingMessage
 
 setup_logging()
 log = get_logger(__name__)
@@ -290,6 +291,70 @@ async def update_handover(handover_id: str, status: HandoverStatus) -> dict[str,
     if not ok:
         raise HTTPException(status_code=500, detail="could not update handover")
     return {"id": handover_id, "status": str(status)}
+
+
+# Midpoint of each category's scoring band (see intelligence.py's category
+# guidance) — a manual drag needs *a* number, and the midpoint reads as
+# "typical for this category" rather than an arbitrary boundary value.
+_CATEGORY_SCORE_MIDPOINT = {
+    LeadCategory.HOT: 85,
+    LeadCategory.WARM: 55,
+    LeadCategory.COLD: 20,
+    LeadCategory.NOT_INTERESTED: 0,
+}
+
+
+@api.patch("/leads/{conversation_id}")
+async def override_lead_category(
+    conversation_id: str, category: LeadCategory
+) -> dict[str, Any]:
+    """Manually move a lead to a different category (the kanban drag action).
+
+    Appends a new lead_scores row rather than editing one in place — scoring
+    stays append-only throughout the system, so a manual move sits in the same
+    history as an AI-generated score and ranking movement stays auditable. The
+    next inbound message still triggers ordinary AI re-scoring; this is a
+    correction, not a lock.
+    """
+    existing = await store.get_ranked_leads(limit=1000)
+    current = next(
+        (lead for lead in existing if lead.get("conversation_id") == conversation_id),
+        None,
+    )
+    score = LeadScore(
+        conversation_id=conversation_id,
+        customer_id=current.get("customer_id") if current else None,
+        score=_CATEGORY_SCORE_MIDPOINT[category],
+        category=category,
+        intent=current.get("intent") if current else None,
+        factors={"manual_override": 1},
+        confidence=1.0,
+    )
+    ok = await store.save_lead_score(score)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not save lead override")
+    return {
+        "conversation_id": conversation_id,
+        "category": str(category),
+        "score": score.score,
+    }
+
+
+class CustomerUpdate(BaseModel):
+    name: str | None = None
+    company_name: str | None = None
+    location: str | None = None
+    phone: str | None = None
+    email: str | None = None
+
+
+@api.patch("/customers/{customer_id}")
+async def update_customer(customer_id: str, update: CustomerUpdate) -> dict[str, Any]:
+    """Let a rep correct or fill in a customer's own fields."""
+    ok = await store.update_customer_fields(customer_id, update.model_dump(exclude_none=True))
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not update customer")
+    return {"id": customer_id, **update.model_dump(exclude_none=True)}
 
 
 # ---------------------------------------------------------------------------
