@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     telegram_timeout_seconds: float = 10.0
 
+    # WhatsApp Business Cloud API — WhatsAppAdapter is a documented stub
+    # (see app/channels.py) until the client provides these. Present here so
+    # the settings object is ready the moment the adapter is implemented; an
+    # empty value simply means the adapter stays unreachable.
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_business_account_id: str = ""
+    # HMAC-verifies X-Hub-Signature-256 on every inbound webhook — unlike
+    # Telegram's plain secret header, this is not optional per Meta's docs.
+    whatsapp_app_secret: str = ""
+    # Matched against hub.verify_token on the one-time GET webhook verification.
+    whatsapp_verify_token: str = ""
+    whatsapp_api_version: str = "v21.0"
+    whatsapp_timeout_seconds: float = 10.0
+
     # Dashboard API
     dashboard_api_key: str = ""
 
@@ -67,6 +82,13 @@ class Settings(BaseSettings):
     @property
     def telegram_api_base(self) -> str:
         return f"https://api.telegram.org/bot{self.telegram_bot_token}"
+
+    @property
+    def whatsapp_api_base(self) -> str:
+        return (
+            f"https://graph.facebook.com/{self.whatsapp_api_version}"
+            f"/{self.whatsapp_phone_number_id}"
+        )
 
 
 @lru_cache
