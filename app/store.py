@@ -17,6 +17,7 @@ from typing import Any
 
 from supabase import AsyncClient, AsyncClientOptions, acreate_client
 
+from app import cache
 from app.config import settings
 from app.enums import (
     AiLogEvent,
@@ -99,6 +100,7 @@ async def upsert_customer(customer: Customer) -> str | None:
             "customer_upserted",
             extra={"customer_id": customer_id, "channel": str(customer.channel)},
         )
+        await cache.invalidate(cache.customer_key(str(customer.channel), customer.channel_user_id))
         return customer_id
     except Exception:
         log.exception("customer_upsert_failed", extra={"channel": str(customer.channel)})
@@ -118,8 +120,11 @@ async def update_customer_fields(customer_id: str, fields: dict[str, Any]) -> bo
     if not payload:
         return True
     try:
-        await client.table("customers").update(payload).eq("id", customer_id).execute()
+        result = await client.table("customers").update(payload).eq("id", customer_id).execute()
         log.info("customer_fields_updated", extra={"customer_id": customer_id})
+        if result.data:
+            row = result.data[0]
+            await cache.invalidate(cache.customer_key(row["channel"], row["channel_user_id"]))
         return True
     except Exception:
         log.exception("customer_update_failed", extra={"customer_id": customer_id})
@@ -127,22 +132,29 @@ async def update_customer_fields(customer_id: str, fields: dict[str, Any]) -> bo
 
 
 async def get_customer(channel: Channel, channel_user_id: str) -> dict[str, Any] | None:
-    client = await get_client()
-    if client is None:
-        return None
-    try:
-        result = (
-            await client.table("customers")
-            .select("*")
-            .eq("channel", str(channel))
-            .eq("channel_user_id", channel_user_id)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        log.exception("customer_fetch_failed")
-        return None
+    async def _fetch() -> dict[str, Any] | None:
+        client = await get_client()
+        if client is None:
+            return None
+        try:
+            result = (
+                await client.table("customers")
+                .select("*")
+                .eq("channel", str(channel))
+                .eq("channel_user_id", channel_user_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception:
+            log.exception("customer_fetch_failed")
+            return None
+
+    return await cache.get_or_set(
+        cache.customer_key(str(channel), channel_user_id),
+        settings.cache_customer_ttl_seconds,
+        _fetch,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +397,7 @@ async def upsert_summary(summary: ConversationSummary) -> bool:
             .execute()
         )
         log.info("summary_upserted", extra={"conversation_id": summary.conversation_id})
+        await cache.invalidate(cache.summary_key(summary.conversation_id))
         return True
     except Exception:
         log.exception("summary_upsert_failed", extra={"conversation_id": summary.conversation_id})
@@ -392,21 +405,26 @@ async def upsert_summary(summary: ConversationSummary) -> bool:
 
 
 async def get_summary(conversation_id: str) -> dict[str, Any] | None:
-    client = await get_client()
-    if client is None:
-        return None
-    try:
-        result = (
-            await client.table("conversation_summaries")
-            .select("*")
-            .eq("conversation_id", conversation_id)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        log.exception("summary_fetch_failed", extra={"conversation_id": conversation_id})
-        return None
+    async def _fetch() -> dict[str, Any] | None:
+        client = await get_client()
+        if client is None:
+            return None
+        try:
+            result = (
+                await client.table("conversation_summaries")
+                .select("*")
+                .eq("conversation_id", conversation_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception:
+            log.exception("summary_fetch_failed", extra={"conversation_id": conversation_id})
+            return None
+
+    return await cache.get_or_set(
+        cache.summary_key(conversation_id), settings.cache_summary_ttl_seconds, _fetch
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -468,21 +486,27 @@ async def get_handover_queue(
 async def get_machine_by_code(machine_code: str) -> dict[str, Any] | None:
     """Exact-match lookup. Complements vector search, which is weakest on
     model numbers like VMC-850 — precisely what customers type."""
-    client = await get_client()
-    if client is None:
-        return None
-    try:
-        result = (
-            await client.table("machines")
-            .select("*")
-            .ilike("machine_code", machine_code)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        log.exception("machine_fetch_failed", extra={"machine_code": machine_code})
-        return None
+
+    async def _fetch() -> dict[str, Any] | None:
+        client = await get_client()
+        if client is None:
+            return None
+        try:
+            result = (
+                await client.table("machines")
+                .select("*")
+                .ilike("machine_code", machine_code)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception:
+            log.exception("machine_fetch_failed", extra={"machine_code": machine_code})
+            return None
+
+    return await cache.get_or_set(
+        cache.machine_key(machine_code), settings.cache_machine_ttl_seconds, _fetch
+    )
 
 
 async def upsert_machine(
@@ -515,6 +539,11 @@ async def upsert_machine(
         )
         machine_id = result.data[0]["id"] if result.data else None
         log.info("machine_upserted", extra={"machine_code": machine_code, "id": machine_id})
+        await cache.invalidate(
+            cache.machine_key(machine_code),
+            cache.machines_list_key(None),
+            cache.machines_list_key(category),
+        )
         return machine_id
     except Exception:
         log.exception("machine_upsert_failed", extra={"machine_code": machine_code})
@@ -560,8 +589,15 @@ async def delete_machine(machine_id: str) -> bool:
     if client is None:
         return False
     try:
-        await client.table("machines").delete().eq("id", machine_id).execute()
+        result = await client.table("machines").delete().eq("id", machine_id).execute()
         log.info("machine_deleted", extra={"machine_id": machine_id})
+        if result.data:
+            row = result.data[0]
+            await cache.invalidate(
+                cache.machine_key(row["machine_code"]),
+                cache.machines_list_key(None),
+                cache.machines_list_key(row.get("category")),
+            )
         return True
     except Exception:
         log.exception("machine_delete_failed", extra={"machine_id": machine_id})
@@ -586,18 +622,23 @@ async def list_machine_documents(machine_id: str | None = None) -> list[dict[str
 
 
 async def list_machines(category: str | None = None) -> list[dict[str, Any]]:
-    client = await get_client()
-    if client is None:
-        return []
-    try:
-        query = client.table("machines").select("*").eq("is_active", True)
-        if category:
-            query = query.eq("category", category)
-        result = await query.execute()
-        return result.data or []
-    except Exception:
-        log.exception("machine_list_failed")
-        return []
+    async def _fetch() -> list[dict[str, Any]]:
+        client = await get_client()
+        if client is None:
+            return []
+        try:
+            query = client.table("machines").select("*").eq("is_active", True)
+            if category:
+                query = query.eq("category", category)
+            result = await query.execute()
+            return result.data or []
+        except Exception:
+            log.exception("machine_list_failed")
+            return []
+
+    return await cache.get_or_set(
+        cache.machines_list_key(category), settings.cache_machine_ttl_seconds, _fetch
+    )
 
 
 # ---------------------------------------------------------------------------

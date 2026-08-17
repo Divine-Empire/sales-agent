@@ -10,7 +10,8 @@ from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from app import store
+from app import cache, store
+from app.config import settings
 from app.logging_config import get_logger
 
 log = get_logger(__name__)
@@ -32,8 +33,18 @@ async def overview() -> dict[str, Any]:
     """Everything the dashboard's landing page needs, in one call.
 
     One round trip rather than six: the dashboard renders server-side and each
-    extra request is another cold-start-latency hop to Render.
+    extra request is another cold-start-latency hop to Render. Short-TTL
+    cached (Addition.md Phase F) — this recomputes from five separate
+    Supabase reads every call with no dedicated write path to invalidate
+    against, so a short TTL is the whole invalidation story, per the plan's
+    own guidance for dashboard aggregates.
     """
+    return await cache.get_or_set(
+        cache.dashboard_key("overview"), settings.cache_dashboard_ttl_seconds, _overview
+    )
+
+
+async def _overview() -> dict[str, Any]:
     leads, handovers, opt_outs, summaries, conversations = (
         await store.get_ranked_leads(limit=500),
         await store.get_handover_queue(limit=200),

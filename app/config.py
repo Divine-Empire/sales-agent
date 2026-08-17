@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     jobs_block_ms: int = 5000
     jobs_batch_size: int = 10
 
+    # Phase F — exact hot-read caching (Addition.md §Phase F candidate table).
+    cache_customer_ttl_seconds: int = 300
+    cache_summary_ttl_seconds: int = 1800
+    cache_machine_ttl_seconds: int = 2400
+    cache_rag_ttl_seconds: int = 1200
+    cache_dashboard_ttl_seconds: int = 45
+    cache_stampede_lock_ttl_seconds: float = 5.0
+    cache_stampede_wait_seconds: float = 2.0
+
     # Dashboard API
     dashboard_api_key: str = ""
 

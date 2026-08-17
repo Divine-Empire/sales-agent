@@ -157,9 +157,40 @@ still `false` in production pending a worker service — see below.
   consumes; intelligence scoring/summaries would silently stop updating
   instead of falling back to inline (the inline fallback only triggers when
   enqueueing itself fails, not when nothing drains the queue).
-- **Not implemented yet**: hot-read caching (Phase F), semantic FAQ cache
-  (Phase G), CRM web research (Phase H) — each behind its own settings flag
-  (already present in `app/config.py`, all default `false`).
+- **Phase F** (done, not yet enabled in production — see production status
+  note): `app/cache.py` — generic cache-aside (`get_or_set`/`invalidate`/
+  `invalidate_namespace`) with single-flight stampede protection (a short
+  `SET NX PX` lock; **note the plan's own `ex=` float bug**: redis-py's
+  `ex=`/`nx=` params reject a `float` TTL outright — `DataError: ex must be
+  datetime.timedelta or int` — this was a real bug caught live during
+  testing, silently swallowed by an overly broad `except Exception` around
+  the lock-acquire call, which made every write path look like "lock
+  contention" and skip populating the cache entirely; fixed by converting to
+  `px=<int milliseconds>`). Wired into all 5 of the plan's candidates:
+  `store.get_customer`/`upsert_customer`/`update_customer_fields`,
+  `store.get_summary`/`upsert_summary`, `store.get_machine_by_code`/
+  `list_machines`/`upsert_machine`/`delete_machine`, `rag.search` (keyed by
+  normalized query text — skips both the embedding call and the Qdrant
+  search on a hit), and `analytics.overview` (short TTL only, no dedicated
+  write path to invalidate against — matches the plan's own guidance for
+  dashboard aggregates; `analytics.report` is deliberately left uncached,
+  its docstring already commits to "never stale"). Opt-outs are
+  **deliberately never cached** anywhere, per the plan's explicit red line.
+  Invalidation is direct delete-on-write from each mutating call site, not a
+  `catalog_version` counter — this system has no multi-instance
+  cache-consistency need yet, so a version scheme would be complexity ahead
+  of any real payoff; RAG's cache instead clears its whole namespace via
+  `SCAN` (never `KEYS`) on `rag.ingest()`, since a re-ingest already replaces
+  the whole Qdrant collection at once. Verified live against Redis Cloud and
+  the real Supabase/Qdrant/OpenAI backends (not mocked): customer/summary/
+  machine cache-then-invalidate-then-fresh-read cycles all correct; RAG
+  cache hit **4.68s → 0.22s** with identical content; dashboard overview hit
+  **2.15s → 0.24s** with identical content; every path confirmed to degrade
+  to an uncached call with `REDIS_CACHE_ENABLED=false` (production's current
+  setting).
+- **Not implemented yet**: semantic FAQ cache (Phase G), CRM web research
+  (Phase H) — each behind its own settings flag (already present in
+  `app/config.py`, all default `false`).
 
 ## What the dashboard (sibling repo) can rely on
 
@@ -233,11 +264,22 @@ deployment, not just locally:
 
 **`REDIS_JOBS_ENABLED` is still `false`** on the web service. The code
 (Phase E, `app/jobs.py`/`app/worker.py`) is deployed and live-tested against
-Redis Cloud directly (see the Phase E entry above), but turning the flag on
-without a separate Render **Background Worker** service running
-`uv run python -m app.worker` would enqueue jobs that nothing consumes —
-intelligence scoring/summaries would silently stop updating instead of
-falling back to inline, since the inline fallback only triggers when
-enqueueing itself fails, not when nothing drains the queue. Don't flip this
-flag on the web service alone; the worker service needs to exist first, with
-the same environment variables copied over.
+Redis Cloud directly (see the Phase E entry above). Render Background
+Workers (a persistent process) aren't on the free tier, so the activation
+path here is `app/worker.py`'s drain-and-exit mode
+(`uv run python -m app.worker --once`) on a Render **Cron Job** (free tier)
+instead — that cron job hasn't been created yet. Don't flip
+`REDIS_JOBS_ENABLED=true` on the web service alone before it exists and has
+run successfully at least once; jobs would enqueue with nothing consuming
+them, and intelligence scoring/summaries would silently stop updating
+instead of falling back to inline (the inline fallback only triggers when
+enqueueing itself fails, not when nothing drains the queue).
+
+**`REDIS_CACHE_ENABLED` is `false`** on the web service (Phase F code is
+deployed but dormant in production) and deliberately left `false` in
+`.env.render` for you to enable explicitly — unlike Phases B–D, caching has
+enough staleness-risk surface (and this phase's own live-testing already
+caught one real bug — see the Phase F entry above) that it's worth a
+deliberate look before flipping it in production, rather than defaulting it
+on. It's already `true` locally (`.env`) and fully verified there against
+the real Supabase/Qdrant/OpenAI backends.

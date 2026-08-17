@@ -23,6 +23,7 @@ from pathlib import Path
 
 from qdrant_client import AsyncQdrantClient, models
 
+from app import cache
 from app.config import settings
 from app.llm import embed
 from app.logging_config import get_logger, setup_logging
@@ -147,49 +148,63 @@ async def search(
     query: str, *, limit: int | None = None, conversation_id: str | None = None
 ) -> list[RetrievedChunk]:
     """Retrieve product context. Returns [] on any failure — the agent then
-    answers without context instead of failing the turn."""
-    client = get_client()
-    if client is None or not query.strip():
-        return []
+    answers without context instead of failing the turn.
+
+    Cached by normalized query text (Addition.md Phase F) — a hit skips both
+    the embedding call and the Qdrant search, since the whole point is that
+    repeated product questions ("what's the price of X") are common and
+    identical in substance across customers.
+    """
     limit = limit or settings.rag_top_k
 
-    vectors = await embed([query], conversation_id=conversation_id)
-    if not vectors:
-        log.warning("rag_embed_unavailable", extra={"conversation_id": conversation_id})
+    async def _fetch() -> list[dict]:
+        client = get_client()
+        if client is None or not query.strip():
+            return []
+
+        vectors = await embed([query], conversation_id=conversation_id)
+        if not vectors:
+            log.warning("rag_embed_unavailable", extra={"conversation_id": conversation_id})
+            return []
+
+        try:
+            response = await client.query_points(
+                collection_name=settings.qdrant_collection,
+                query=vectors[0],
+                limit=limit,
+                score_threshold=settings.rag_score_threshold,
+                with_payload=True,
+            )
+        except Exception:
+            log.exception("rag_search_failed", extra={"conversation_id": conversation_id})
+            return []
+
+        chunks = [
+            RetrievedChunk(
+                text=p.payload.get("text", ""),
+                score=p.score,
+                machine_code=(p.payload.get("codes") or [None])[0],
+                category=p.payload.get("category"),
+            )
+            for p in response.points
+            if p.payload
+        ]
+        log.info(
+            "rag_search",
+            extra={
+                "conversation_id": conversation_id,
+                "query": query[:80],
+                "hits": len(chunks),
+                "top_score": round(chunks[0].score, 3) if chunks else 0.0,
+            },
+        )
+        return [c.model_dump() for c in chunks]
+
+    if not query.strip():
         return []
 
-    try:
-        response = await client.query_points(
-            collection_name=settings.qdrant_collection,
-            query=vectors[0],
-            limit=limit,
-            score_threshold=settings.rag_score_threshold,
-            with_payload=True,
-        )
-    except Exception:
-        log.exception("rag_search_failed", extra={"conversation_id": conversation_id})
-        return []
-
-    chunks = [
-        RetrievedChunk(
-            text=p.payload.get("text", ""),
-            score=p.score,
-            machine_code=(p.payload.get("codes") or [None])[0],
-            category=p.payload.get("category"),
-        )
-        for p in response.points
-        if p.payload
-    ]
-    log.info(
-        "rag_search",
-        extra={
-            "conversation_id": conversation_id,
-            "query": query[:80],
-            "hits": len(chunks),
-            "top_score": round(chunks[0].score, 3) if chunks else 0.0,
-        },
-    )
-    return chunks
+    raw = await cache.get_or_set(cache.rag_key(query), settings.cache_rag_ttl_seconds, _fetch)
+    return [RetrievedChunk(**c) for c in raw]
 
 
 def build_context(chunks: list[RetrievedChunk]) -> str:
@@ -254,6 +269,11 @@ async def ingest(path: Path = KNOWLEDGE_BASE) -> int:
         await client.upsert(collection_name=settings.qdrant_collection, points=points)
         embedded += len(points)
         log.info("ingest_batch", extra={"embedded": embedded, "total": len(chunks)})
+
+    # A re-ingest replaces the whole collection, so every previously cached
+    # RAG result is now potentially stale — clear the namespace rather than
+    # try to guess which normalized queries it might affect.
+    await cache.invalidate_namespace("rag")
 
     return embedded
 
