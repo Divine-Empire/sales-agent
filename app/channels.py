@@ -43,6 +43,10 @@ class ChannelAdapter(ABC):
         """Deliver a reply. Returns False on failure rather than raising."""
 
 
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$", re.MULTILINE)
+_BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$", re.MULTILINE)
+
+
 def to_telegram_html(text: str) -> str:
     """Render model output as Telegram HTML.
 
@@ -51,11 +55,20 @@ def to_telegram_html(text: str) -> str:
     '.' or '-' that makes Telegram reject the entire message. HTML needs three.
 
     Escaping happens first, so any '<' the model wrote is inert before we add
-    tags of our own. Only **bold** is converted — that is the one marker the
-    model actually emits, and every tag we do not create is a tag that cannot
-    be malformed. `send()` falls back to plain text if Telegram still objects.
+    tags of our own. GPT-4o defaults to Markdown headings (`### Title`) and
+    `- ` bullets for anything list-shaped (like a product catalog) even
+    though nothing in the prompt asks for them, and Telegram's HTML mode has
+    no heading/list elements at all — left alone, the customer sees literal
+    '###' and '-' characters. Headings become a bold line, bullets become
+    '• '; both run before the generic **bold**/*bold* conversion, since a
+    heading line has no asterisks to trip over but a bullet's text often
+    does (`- **Bar Bending Machines**`). Every tag we do not create is a tag
+    that cannot be malformed. `send()` falls back to plain text if Telegram
+    still objects.
     """
     escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = _HEADING_RE.sub(r"<b>\1</b>", escaped)
+    escaped = _BULLET_RE.sub(r"\1• \2", escaped)
     # **bold** and *bold* -> <b>. Non-greedy, single-line, so an unmatched
     # asterisk is left as literal text rather than swallowing the message.
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
