@@ -89,14 +89,24 @@ its own settings flag (already present in `app/config.py`, all default
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status
-and PATCH category-override), `conversations/{id}`, `overview`,
-`reports/{type}`, `customers` (+ PATCH), `opt-outs`, `summaries`, `logs`,
-`machines` (+ upload/text-add/delete). All require `X-API-Key`. There is
-**no purpose-built "conversation list/inbox" endpoint yet** — if the
-dashboard's Telegram inbox needs one (last-message preview joined against
-`current_leads`/`conversation_summaries`), that's new backend work, ask for
-it rather than assembling it from multiple round trips in the browser.
+and PATCH category-override), `conversations` (inbox list, added
+2026-08-17 — see below), `conversations/{id}`, `overview`, `reports/{type}`,
+`customers` (+ PATCH), `opt-outs`, `summaries`, `logs`, `machines`
+(+ upload/text-add/delete). All require `X-API-Key`.
 There is **no unread/read-tracking concept anywhere in the schema.**
+
+`GET /api/conversations?limit=50&channel=telegram` is the Telegram inbox
+list endpoint: every conversation (not just ones the intelligence pass has
+summarized yet), newest `last_message_at` first, each row carrying
+`customer_name`/`company_name`/`channel_user_id`/`phone`, a `last_message`
++ `last_message_role` preview, and — when a summary exists —
+`lead_score`/`lead_category`/`handover_status`/`customer_intent` (all
+`None`/`"none"` otherwise, not an error). Built from `conversations` as the
+membership source (not `conversation_summaries`, which would silently hide
+brand-new threads) via `store.list_conversations`; last-message and summary
+data are merged in with two follow-up queries scoped to just the returned
+conversation ids, same shape as the rest of `app/store.py`. Verified against
+the live production Supabase — returns the one real conversation correctly.
 
 `current_leads` is a view over append-only `lead_scores` — every score
 (AI-generated or manually overridden from the dashboard) is a new row, never

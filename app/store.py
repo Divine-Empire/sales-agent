@@ -751,6 +751,91 @@ async def count_conversations() -> int:
         return 0
 
 
+async def list_conversations(limit: int = 50, channel: str | None = None) -> list[dict[str, Any]]:
+    """Inbox view: every conversation, newest activity first, with a last-
+    message preview and (if the agent has analysed it) summary/lead fields.
+
+    Built from `conversations` rather than `conversation_summaries` so a
+    brand-new thread the intelligence pass hasn't touched yet still shows up
+    — `conversation_summaries`/`current_leads` are enrichment, not the
+    membership list.
+    """
+    client = await get_client()
+    if client is None:
+        return []
+    try:
+        query = client.table("conversations").select(
+            "conversation_id, channel, status, started_at, last_message_at, "
+            "customers(name, company_name, channel_user_id, phone)"
+        )
+        if channel:
+            query = query.eq("channel", channel)
+        result = await query.order("last_message_at", desc=True).limit(limit).execute()
+        conversations = result.data or []
+        if not conversations:
+            return []
+
+        conversation_ids = [row["conversation_id"] for row in conversations]
+
+        # PostgREST has no DISTINCT ON embed, so pull recent messages for
+        # just these conversations and keep the first (newest) per id —
+        # same reverse-then-limit trick as get_history.
+        messages_result = (
+            await client.table("messages")
+            .select("conversation_id, role, content, created_at")
+            .in_("conversation_id", conversation_ids)
+            .order("created_at", desc=True)
+            .limit(len(conversation_ids) * 5)
+            .execute()
+        )
+        last_message: dict[str, dict[str, Any]] = {}
+        for row in messages_result.data or []:
+            cid = row["conversation_id"]
+            if cid not in last_message:
+                last_message[cid] = row
+
+        summaries_result = (
+            await client.table("conversation_summaries")
+            .select(
+                "conversation_id, lead_score, lead_category, handover_status, "
+                "customer_intent, updated_at"
+            )
+            .in_("conversation_id", conversation_ids)
+            .execute()
+        )
+        summary_by_id = {row["conversation_id"]: row for row in summaries_result.data or []}
+
+        rows = []
+        for row in conversations:
+            cid = row["conversation_id"]
+            customer = row.pop("customers", None) or {}
+            summary = summary_by_id.get(cid)
+            last = last_message.get(cid)
+            rows.append(
+                {
+                    "conversation_id": cid,
+                    "channel": row["channel"],
+                    "status": row["status"],
+                    "started_at": row["started_at"],
+                    "last_message_at": row["last_message_at"],
+                    "customer_name": customer.get("name"),
+                    "company_name": customer.get("company_name"),
+                    "channel_user_id": customer.get("channel_user_id"),
+                    "phone": customer.get("phone"),
+                    "last_message": last.get("content") if last else None,
+                    "last_message_role": last.get("role") if last else None,
+                    "lead_score": summary.get("lead_score") if summary else None,
+                    "lead_category": summary.get("lead_category") if summary else None,
+                    "handover_status": summary.get("handover_status") if summary else "none",
+                    "customer_intent": summary.get("customer_intent") if summary else None,
+                }
+            )
+        return rows
+    except Exception:
+        log.exception("conversations_list_failed")
+        return []
+
+
 async def bootstrap_turn(
     channel: Channel,
     user_id: str,

@@ -262,6 +262,14 @@ async def handovers(status: HandoverStatus = HandoverStatus.PENDING) -> dict[str
     return {"count": len(rows), "handovers": rows}
 
 
+@api.get("/conversations")
+async def conversations(limit: int = 50, channel: str | None = None) -> dict[str, Any]:
+    """Inbox list: every conversation, newest activity first, with a
+    last-message preview, lead score/category, and handover status."""
+    rows = await store.list_conversations(limit=limit, channel=channel)
+    return {"count": len(rows), "conversations": rows}
+
+
 @api.get("/conversations/{conversation_id}")
 async def conversation(conversation_id: str) -> dict[str, Any]:
     """Full history plus the current summary for one conversation."""
