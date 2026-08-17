@@ -211,6 +211,39 @@ still `false` in production pending a worker service — see below.
   (Phase H) — each behind its own settings flag (already present in
   `app/config.py`, all default `false`).
 
+## Document ingestion — OCR fallback for scanned PDFs
+
+`app/documents.py`'s `extract_text`/`_extract_pdf` are async now (not a Redis
+phase — added 2026-08-17 while onboarding real product brochures). Per page:
+try `pypdf`'s normal text extraction first; if a page yields nothing (a
+picture of a page, not real text — common in brochures with photo-heavy
+layout pages mixed with real text pages), render just that page to a PNG via
+`pypdfium2` (pure-Python wheel, no system `poppler`/Ghostscript dependency —
+matters because Render's buildpack has no path to install system binaries
+without a Dockerfile, which this repo deliberately doesn't have) and
+transcribe it with `app/llm.py`'s `transcribe_image()` (GPT-4o vision, no
+Groq fallback — same reasoning as `embed()`, Groq's models here are
+text-only). Only pages that actually fail real extraction get OCR'd, so an
+already-text PDF costs nothing extra. `ExtractionError` still fires if every
+page fails both real extraction and OCR — a genuinely unreadable scan, not a
+silent empty document.
+
+Verified against real files in `data/`: the corporate brochure (previously
+failed extraction entirely, `ExtractionError`) now yields 12,473 chars; the
+three Sokkia spec-sheet PDFs (already text-extractable) are unchanged and
+trigger zero OCR calls. Also verified against a genuinely image-only test
+PDF (a bio page re-embedded with no text layer) — correct verbatim
+transcription. `transcribe_image` strips a markdown code fence if the model
+wraps its answer in one, since that would otherwise land in
+`machine_documents`/RAG chunks verbatim.
+
+New settings: `OCR_MAX_OUTPUT_TOKENS` (2000 — a dense page transcribed
+verbatim needs more than a normal chat reply's budget), `OCR_TIMEOUT_SECONDS`
+(60 — vision calls run slower), `OCR_MAX_PAGES` (30 — a very long scanned
+document is skipped rather than run up a large per-page API bill silently;
+logged as `ocr_skipped_too_many_pages`). New deps: `pypdfium2`, `pillow`
+(both pure-wheel, safe on Render's buildpack).
+
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status

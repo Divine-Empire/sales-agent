@@ -17,6 +17,8 @@ dependencies = [
     "python-docx>=1.2.0",
     "python-multipart>=0.0.32",
     "redis[hiredis]>=5.0.0",
+    "pypdfium2>=5.13.0",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]

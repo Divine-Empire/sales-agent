@@ -222,3 +222,7 @@ docs/
 .claude/
 app_scripts/
 .env.render
+
+# Source PDFs for the document-upload endpoint, not code the deploy needs —
+# knowledge_base.md is the one data/ file that ships.
+data/*.pdf

@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
     llm_max_output_tokens: int = 600
 
+    # OCR (scanned-PDF fallback, app/llm.py transcribe_image / app/documents.py).
+    # A dense spec-sheet page transcribed verbatim easily exceeds a normal
+    # chat reply's token budget.
+    ocr_max_output_tokens: int = 2000
+    ocr_timeout_seconds: float = 60.0
+    ocr_max_pages: int = 30
+
     # Qdrant
     qdrant_url: str = ""
     qdrant_api_key: str = ""

@@ -14,13 +14,14 @@ rather than loading everything at once.
 
 from __future__ import annotations
 
+import base64
 import io
 from typing import Any
 
 from app import store
 from app.config import settings
 from app.enums import DocumentType
-from app.llm import embed
+from app.llm import embed, transcribe_image
 from app.logging_config import get_logger
 from app.rag import ensure_collection, extract_codes, get_client
 
@@ -46,7 +47,7 @@ class ExtractionError(RuntimeError):
     """The file could not be turned into text. The message reaches the user."""
 
 
-def extract_text(data: bytes, filename: str, content_type: str | None) -> str:
+async def extract_text(data: bytes, filename: str, content_type: str | None) -> str:
     """Pull plain text out of an uploaded document.
 
     Raises ExtractionError with a message worth showing a user — "this looks
@@ -73,13 +74,13 @@ def extract_text(data: bytes, filename: str, content_type: str | None) -> str:
             )
 
     if kind == "pdf":
-        return _extract_pdf(data)
+        return await _extract_pdf(data)
     if kind == "docx":
         return _extract_docx(data)
     return data.decode("utf-8", errors="replace").strip()
 
 
-def _extract_pdf(data: bytes) -> str:
+async def _extract_pdf(data: bytes) -> str:
     from pypdf import PdfReader
 
     try:
@@ -87,26 +88,91 @@ def _extract_pdf(data: bytes) -> str:
     except Exception as exc:
         raise ExtractionError(f"Could not read the PDF: {exc}") from exc
 
-    # Page by page, so a large document never sits in memory whole.
+    page_count = len(reader.pages)
+
+    # Page by page, so a large document never sits in memory whole. A page
+    # with no extractable text is usually a scan (a picture of a page, not
+    # real text) rather than an empty page — those get OCR'd individually
+    # rather than failing the whole document, since a brochure is often a
+    # mix (a photo cover page, then real text pages, or vice versa).
     pages: list[str] = []
-    for page in reader.pages:
+    ocr_pages: list[int] = []
+    for index, page in enumerate(reader.pages):
         try:
             text = page.extract_text() or ""
         except Exception:
             text = ""
         if text.strip():
             pages.append(text.strip())
+        else:
+            pages.append("")
+            ocr_pages.append(index)
 
-    combined = "\n\n".join(pages).strip()
+    if ocr_pages:
+        if page_count > settings.ocr_max_pages:
+            log.warning(
+                "ocr_skipped_too_many_pages",
+                extra={"page_count": page_count, "limit": settings.ocr_max_pages},
+            )
+        else:
+            ocr_results = await _ocr_pages(data, ocr_pages)
+            for index, text in ocr_results.items():
+                if text:
+                    pages[index] = text
+
+    combined = "\n\n".join(p for p in pages if p).strip()
     if not combined:
-        # Scanned PDFs are images. Say so plainly rather than silently storing
-        # an empty document that will never answer a question.
+        # Every page failed both real extraction and OCR — genuinely nothing
+        # to work with, rather than silently storing an empty document that
+        # will never answer a question.
         raise ExtractionError(
-            "No text found. This looks like a scanned PDF — the pages are images, "
-            "not text. Please upload a text-based PDF, or paste the specifications "
+            "No text could be read from this PDF, even with OCR. The scan "
+            "quality may be too low, or the page is a diagram/photo with no "
+            "text. Please upload a clearer PDF, or paste the specifications "
             "directly."
         )
     return combined
+
+
+async def _ocr_pages(data: bytes, page_indices: list[int]) -> dict[int, str | None]:
+    """Render specific pages to images and transcribe them via GPT-4o vision.
+
+    Rendered one page at a time (not the whole document at once) to keep
+    memory bounded — the same reasoning as the page-by-page text extraction
+    above, just for images instead of text.
+    """
+    import pypdfium2 as pdfium
+
+    results: dict[int, str | None] = {}
+    try:
+        pdf = pdfium.PdfDocument(data)
+    except Exception:
+        log.exception("ocr_pdf_open_failed")
+        return results
+
+    try:
+        for index in page_indices:
+            try:
+                page = pdf[index]
+                # 2x scale (~144 DPI) balances legibility for spec-sheet text
+                # against image payload size sent to the vision API.
+                bitmap = page.render(scale=2.0)
+                pil_image = bitmap.to_pil()
+                buffer = io.BytesIO()
+                pil_image.save(buffer, format="PNG")
+                image_b64 = base64.b64encode(buffer.getvalue()).decode()
+            except Exception:
+                log.exception("ocr_page_render_failed", extra={"page": index})
+                results[index] = None
+                continue
+
+            text = await transcribe_image(image_b64)
+            results[index] = text
+            log.info("ocr_page_done", extra={"page": index, "found_text": bool(text)})
+    finally:
+        pdf.close()
+
+    return results
 
 
 def _extract_docx(data: bytes) -> str:
@@ -255,7 +321,7 @@ async def add_machine_from_document(
     doc_type: DocumentType = DocumentType.BROCHURE,
 ) -> dict[str, Any]:
     """Full pipeline: extract, persist the machine and document, index for RAG."""
-    text = extract_text(data, filename, content_type)
+    text = await extract_text(data, filename, content_type)
 
     machine_id = await store.upsert_machine(
         machine_code=machine_code or name.upper().replace(" ", "-")[:40],

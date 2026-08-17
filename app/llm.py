@@ -14,6 +14,7 @@ the whole implementation.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -198,6 +199,64 @@ async def complete(
             extra={**log_ctx, "provider": "groq", "error_type": type(exc).__name__},
         )
         raise LLMUnavailableError(f"groq: {exc}") from exc
+
+
+async def transcribe_image(image_b64: str, *, prompt: str | None = None) -> str | None:
+    """OCR a page image via GPT-4o vision. OpenAI only — Groq's chat models in
+    use here are text-only, so there is no fallback path, same as `embed()`.
+
+    Used for scanned/image-only PDF pages (app/documents.py), where pypdf
+    extracts nothing because the "text" is actually a picture of text. Returns
+    None on failure so the caller can report a clean "couldn't read this
+    page" rather than storing a hallucinated transcription.
+    """
+    client = _primary_client()
+    if client is None:
+        return None
+    started = time.perf_counter()
+    try:
+        raw = await client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                            or (
+                                "Transcribe every word of visible text on this page exactly "
+                                "as it appears, preserving tables and structure with plain "
+                                "text/markdown. If the page is a diagram or photo with no "
+                                "readable text, reply with exactly: NO_TEXT_FOUND"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                        },
+                    ],
+                }
+            ],
+            temperature=0.0,
+            max_completion_tokens=settings.ocr_max_output_tokens,
+            timeout=settings.ocr_timeout_seconds,
+        )
+    except Exception:
+        log.exception("vision_transcribe_failed")
+        return None
+
+    text = (raw.choices[0].message.content or "").strip()
+    # The model sometimes wraps its transcription in a markdown code fence
+    # even though the prompt asks for plain text/markdown — strip it so a
+    # stray ``` never ends up stored in machine_documents or a RAG chunk.
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text).strip()
+    latency = int((time.perf_counter() - started) * 1000)
+    log.info("vision_transcribe", extra={"latency_ms": latency, "chars": len(text)})
+    if not text or text == "NO_TEXT_FOUND":
+        return None
+    return text
 
 
 async def embed(texts: list[str], *, conversation_id: str | None = None) -> list[list[float]]:
