@@ -1,10 +1,21 @@
 """Standalone job worker — Phase E of .claude/Addition.md.
 
-Runs as its own Render service/process (`uv run python -m app.worker`), not
-inside the web dyno. Consumes `de:v1:stream:jobs` via a consumer group so
-multiple workers can run without double-processing, acks only after the
-durable work succeeds, reclaims entries an exited worker left pending, and
-retries transient failures with bounded backoff before dead-lettering.
+Two ways to run this, both consuming `de:v1:stream:jobs` via the same
+consumer group so they never double-process each other's work:
+
+- `run()` / `uv run python -m app.worker` — a persistent process (a paid
+  Render Background Worker or similar) that blocks on new entries forever.
+- `run_once()` / `uv run python -m app.worker --once` — drains whatever is
+  currently pending or claimable, then exits. Built for Render's free-tier
+  **Cron Job** service type, which invokes a fresh container on a schedule
+  rather than keeping one alive — there is no persistent process to block
+  in, so this mode processes one batch and returns instead of calling
+  `xreadgroup` with a blocking `block=` wait.
+
+Either way: acks only after the durable work succeeds, reclaims entries a
+previous run left pending (a cron invocation that got killed mid-job looks
+identical to a crashed persistent worker), and retries transient failures
+with bounded backoff before dead-lettering.
 
 Keep job payloads minimal (Addition.md §4 Phase E) — this worker re-fetches
 canonical state (history, customer) from Supabase rather than trusting
@@ -16,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import sys
 import uuid
 
 from app import intelligence, jobs, redis_client
@@ -101,8 +113,58 @@ async def _reclaim_stale(client, consumer: str) -> None:
         log.exception("job_reclaim_failed")
 
 
+async def _drain_once(client, consumer: str) -> int:
+    """Reclaim stale entries, then read and process whatever is immediately
+    available — no blocking wait. Returns the number of entries handled, so
+    the caller can log a useful "nothing to do" vs. "processed N" line."""
+    await _reclaim_stale(client, consumer)
+
+    handled = 0
+    while True:
+        response = await client.xreadgroup(
+            settings.jobs_consumer_group,
+            consumer,
+            {jobs.STREAM_KEY: ">"},
+            count=settings.jobs_batch_size,
+            block=None,  # don't wait — a cron run has no persistent process to block in
+        )
+        entries = response[0][1] if response else []
+        if not entries:
+            break
+        for entry_id, fields in entries:
+            await _handle_entry(client, consumer, entry_id, fields)
+            handled += 1
+    return handled
+
+
+async def run_once() -> None:
+    """Single drain-and-exit pass — the entry point for a Render Cron Job
+    (free tier) invocation. Safe to run on a schedule with no persistent
+    process between runs; a run that dies mid-job just leaves its entry
+    pending for the next scheduled run's `_reclaim_stale` to pick up."""
+    if not settings.redis_jobs_enabled:
+        log.warning("worker_disabled_jobs_flag_off")
+        return
+
+    client = redis_client.get_client()
+    if client is None:
+        log.error("worker_redis_unavailable_at_startup")
+        return
+
+    await jobs.ensure_group(client)
+    consumer = _consumer_name()
+    log.info("worker_run_once_started", extra={"consumer": consumer})
+
+    try:
+        handled = await _drain_once(client, consumer)
+        log.info("worker_run_once_finished", extra={"consumer": consumer, "handled": handled})
+    except Exception:
+        log.exception("worker_run_once_error")
+
+
 async def run() -> None:
-    """Main worker loop. Blocks on new stream entries; never exits on a
+    """Persistent worker loop for an always-on process (paid Background
+    Worker or similar). Blocks on new stream entries; never exits on a
     transient Redis error — logs and retries after a short pause instead."""
     if not settings.redis_jobs_enabled:
         log.warning("worker_disabled_jobs_flag_off")
@@ -140,4 +202,7 @@ async def run() -> None:
 
 if __name__ == "__main__":
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run())
+        if "--once" in sys.argv:
+            asyncio.run(run_once())
+        else:
+            asyncio.run(run())

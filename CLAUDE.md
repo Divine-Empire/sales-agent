@@ -136,12 +136,27 @@ still `false` in production pending a worker service — see below.
   Verified live against Redis Cloud: enqueue → consume → ack; idempotent
   skip on a genuine duplicate delivery but NOT on a legitimate retry;
   retry-then-succeed; retry exhaustion → dead-letter; crashed-worker
-  reclaim → successful reprocessing by a second worker. To actually run
-  this in production, create a Render **Background Worker** service (not
-  a second web service) with start command `uv run python -m app.worker`,
-  pointed at the same repo/env — that hasn't been done yet, so enabling
-  `REDIS_JOBS_ENABLED=true` on the web service alone would enqueue jobs
-  nothing ever consumes.
+  reclaim → successful reprocessing by a second worker.
+
+  **Running it in production**: a paid Render Background Worker
+  (`uv run python -m app.worker`, persistent process) is the natural fit
+  but isn't on Render's free tier. Since this project is running lean,
+  `app/worker.py` also has a **drain-and-exit mode**:
+  `uv run python -m app.worker --once` (`run_once()`) reclaims whatever a
+  previous run left pending, processes everything currently in the stream
+  with no blocking wait, then exits — built specifically for Render's
+  free-tier **Cron Job** service type, which spins up a fresh container on
+  a schedule rather than keeping one alive. Verified live: draining 2
+  queued jobs in one pass (`handled: 2`), and an empty-queue invocation
+  returning immediately (`handled: 0`) rather than blocking. To activate:
+  create a Render **Cron Job** (not Background Worker) pointed at this repo,
+  command `uv run python -m app.worker --once`, schedule e.g. every 2–5
+  minutes, same environment variables as the web service. Enabling
+  `REDIS_JOBS_ENABLED=true` on the web service alone — before either the
+  persistent worker or the cron job exists — would enqueue jobs nothing
+  consumes; intelligence scoring/summaries would silently stop updating
+  instead of falling back to inline (the inline fallback only triggers when
+  enqueueing itself fails, not when nothing drains the queue).
 - **Not implemented yet**: hot-read caching (Phase F), semantic FAQ cache
   (Phase G), CRM web research (Phase H) — each behind its own settings flag
   (already present in `app/config.py`, all default `false`).
