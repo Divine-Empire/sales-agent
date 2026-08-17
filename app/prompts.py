@@ -116,3 +116,5 @@ ERROR_MESSAGE = (
     "Sorry, I'm having a technical issue at the moment. "
     f"Please call our team on {SALES_PHONE} and they'll help you right away."
 )
+
+BUSY_MESSAGE = "Still working on your last message — give me just a moment and I'll reply shortly."

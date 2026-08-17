@@ -17,7 +17,7 @@ import asyncio
 import json
 from typing import Any
 
-from app import commands, prompts, rag, store
+from app import commands, locks, prompts, rag, store
 from app.enums import (
     AiLogEvent,
     ConversationStatus,
@@ -342,7 +342,20 @@ async def handle_message(message: IncomingMessage) -> AgentReply:
     """Process one inbound message and produce a reply.
 
     Never raises: every failure path returns a sendable message.
+
+    Wrapped in a per-conversation lock (Phase C, .claude/Addition.md) so two
+    near-simultaneous deliveries for the same conversation — across Render
+    workers — can't both read the same history and act on stale state. Other
+    conversations proceed fully concurrently; lock acquisition fails open
+    when Redis is disabled or unreachable.
     """
+    async with locks.conversation_lock(message.conversation_id) as acquired:
+        if not acquired:
+            return AgentReply(text=prompts.BUSY_MESSAGE, model="none")
+        return await _handle_message_locked(message)
+
+
+async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
     conversation_id = message.conversation_id
     log.info(
         "message_in",

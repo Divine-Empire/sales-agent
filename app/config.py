@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     redis_jobs_enabled: bool = False
     redis_cache_enabled: bool = False
 
+    # Phase C — per-conversation lock lease and bounded acquisition wait.
+    redis_lock_lease_seconds: float = 30.0
+    redis_lock_wait_seconds: float = 5.0
+    redis_lock_retry_interval_seconds: float = 0.1
+
     # Dashboard API
     dashboard_api_key: str = ""
 

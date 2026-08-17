@@ -75,16 +75,34 @@ reference only — not shipped, ask if you need it summarized).
 ## Redis (optional operational layer)
 
 `.claude/Addition.md` (gitignored, local planning doc) is the full phased
-plan. **Only Phase A is implemented**: `app/redis_client.py` — connection
-lifecycle, versioned key helper (`de:v1:...`), a `safe()` degradation
-wrapper, and `/ready` (separate from `/health`, which stays
-dependency-free). Redis is never the system of record; every feature must
-work identically with it disabled. `REDIS_ENABLED` currently `true` in local
+plan. Redis is never the system of record; every feature must work
+identically with it disabled. `REDIS_ENABLED` currently `true` in local
 `.env` against a real Redis Cloud instance — **not yet added to Render's
-production environment.** No dedup, locking, rate limiting, job queue, or
-caching is implemented yet — those are Phases B–G, one at a time, each behind
-its own settings flag (already present in `app/config.py`, all default
-`false`).
+production environment**, and none of the phase flags below are on in
+production yet; enabling each is a separate, explicit step.
+
+- **Phase A** (done): `app/redis_client.py` — connection lifecycle, versioned
+  key helper (`de:v1:...`), a `safe()` degradation wrapper, and `/ready`
+  (separate from `/health`, which stays dependency-free).
+- **Phase B** (done): `app/dedupe.py` — Telegram `update_id` dedup via
+  `SET NX EX`, fail-open, wired into the webhook handler in `app/main.py`.
+- **Phase C** (done): `app/locks.py` — per-conversation distributed lock
+  (`conversation_lock()`) wrapping the bootstrap→history→RAG→LLM→tools
+  sequence in `app/agent.py` (`handle_message` now just acquires the lock
+  and delegates to `_handle_message_locked`). Random token + ownership-
+  checked Lua release, finite lease (`REDIS_LOCK_LEASE_SECONDS`, default 30s),
+  bounded acquisition wait (`REDIS_LOCK_WAIT_SECONDS`, default 5s) with
+  polling (`REDIS_LOCK_RETRY_INTERVAL_SECONDS`, default 0.1s). Contention
+  past the wait budget returns `prompts.BUSY_MESSAGE` rather than proceeding
+  concurrently. Fails open (turn proceeds unlocked) if Redis is disabled or
+  unreachable. Verified directly against the live Redis Cloud instance:
+  ordered acquisition, cross-conversation concurrency, lease expiry after a
+  simulated crash, and rejected cross-worker release with a mismatched
+  token — all confirmed live, not mocked.
+- **Not implemented yet**: rate limiting (Phase D), durable jobs (Phase E),
+  hot-read caching (Phase F), semantic FAQ cache (Phase G), CRM web research
+  (Phase H) — each behind its own settings flag (already present in
+  `app/config.py`, all default `false`).
 
 ## What the dashboard (sibling repo) can rely on
 
