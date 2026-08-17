@@ -76,10 +76,12 @@ reference only — not shipped, ask if you need it summarized).
 
 `.claude/Addition.md` (gitignored, local planning doc) is the full phased
 plan. Redis is never the system of record; every feature must work
-identically with it disabled. `REDIS_ENABLED` currently `true` in local
-`.env` against a real Redis Cloud instance — **not yet added to Render's
-production environment**, and none of the phase flags below are on in
-production yet; enabling each is a separate, explicit step.
+identically with it disabled. As of 2026-08-17, **Phases A–D are live in
+Render's production environment** (`REDIS_ENABLED`, `REDIS_DEDUPE_ENABLED`,
+`REDIS_LOCKS_ENABLED`, `REDIS_RATE_LIMIT_ENABLED` all `true` on the web
+service, verified against the live deployment — see the production status
+note at the end of this file). Phase E's code is deployed but its flag is
+still `false` in production pending a worker service — see below.
 
 - **Phase A** (done): `app/redis_client.py` — connection lifecycle, versioned
   key helper (`de:v1:...`), a `safe()` degradation wrapper, and `/ready`
@@ -193,3 +195,34 @@ Conventional commits. Push to both `divine` and `origin` remotes.
 `docs/` and `.claude/` are gitignored (planning material, not shipped code)
 — if you need their content, ask; don't assume it doesn't exist just because
 `git ls-files` won't show it.
+
+## Production Redis status (verify against `/ready` before trusting this)
+
+As of 2026-08-17, the Render web service (`sales-agent-956w`) has these live:
+`REDIS_ENABLED=true`, `REDIS_DEDUPE_ENABLED=true`, `REDIS_LOCKS_ENABLED=true`,
+`REDIS_RATE_LIMIT_ENABLED=true` (plus their tuning vars — see
+`.env.render`/`.env.example`). Confirmed working against the actual
+deployment, not just locally:
+
+- `GET /ready` → `{"redis": {"enabled": true, "connected": true}}`.
+- A duplicate Telegram `update_id` produces exactly one persisted
+  user/assistant pair (Phase B dedupe engaging in prod).
+- A 12-message rapid burst from one Telegram user in under a minute: only 5
+  of 12 messages were actually processed (persisted + replied to) — the
+  other 7 were correctly rate-limited before ever reaching the agent or
+  being written to `messages` (Phase D `check_customer` engaging in prod,
+  10/min + 30/5min policy). Rate-limited turns skip `store.save_message`
+  entirely (the check runs in `app/main.py` before `handle_message`), so
+  they leave no history trace by design — don't mistake a lower-than-sent
+  message count for a bug when auditing conversation history after a burst.
+
+**`REDIS_JOBS_ENABLED` is still `false`** on the web service. The code
+(Phase E, `app/jobs.py`/`app/worker.py`) is deployed and live-tested against
+Redis Cloud directly (see the Phase E entry above), but turning the flag on
+without a separate Render **Background Worker** service running
+`uv run python -m app.worker` would enqueue jobs that nothing consumes —
+intelligence scoring/summaries would silently stop updating instead of
+falling back to inline, since the inline fallback only triggers when
+enqueueing itself fails, not when nothing drains the queue. Don't flip this
+flag on the web service alone; the worker service needs to exist first, with
+the same environment variables copied over.
