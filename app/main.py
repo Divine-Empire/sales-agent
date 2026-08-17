@@ -28,7 +28,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app import analytics, dedupe, documents, intelligence, prompts, redis_client, store
+from app import analytics, dedupe, documents, intelligence, prompts, rate_limit, redis_client, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
@@ -118,6 +118,24 @@ async def _process(update: dict[str, Any]) -> None:
         # Suppress automated replies to anyone who has opted out (BRD §13).
         if await store.is_opted_out(incoming.channel, incoming.user_id):
             log.info("suppressed_opted_out", extra={"conversation_id": incoming.conversation_id})
+            return
+
+        limit_result = await rate_limit.check_customer(str(incoming.channel), incoming.user_id)
+        if not limit_result.allowed:
+            log.info(
+                "customer_rate_limited",
+                extra={
+                    "conversation_id": incoming.conversation_id,
+                    "limited_by": limit_result.limited_by,
+                },
+            )
+            await telegram.send(
+                OutgoingMessage(
+                    channel=Channel.TELEGRAM,
+                    user_id=incoming.user_id,
+                    text=prompts.RATE_LIMITED_MESSAGE,
+                )
+            )
             return
 
         await telegram.send_chat_action(incoming.user_id)
@@ -231,18 +249,30 @@ async def telegram_chats() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Reject unauthenticated dashboard requests.
+async def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:
+    """Reject unauthenticated or rate-limited dashboard requests.
 
     When no key is configured the API stays open — that keeps local development
     frictionless, and the deployment sets the key. Startup logs loudly if it is
     missing so an unprotected production deploy is visible.
+
+    Rate limiting fails CLOSED (Addition.md §4): an authenticated internal API
+    that can't verify its own limits should refuse rather than risk abuse.
     """
     if not settings.dashboard_api_key:
         return
     if x_api_key != settings.dashboard_api_key:
         log.warning("api_unauthorised")
         raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+
+    result = await rate_limit.check_dashboard(x_api_key, request.url.path)
+    if not result.allowed:
+        log.warning("api_rate_limited", extra={"route": request.url.path})
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
 
 
 api = APIRouter(prefix="/api", tags=["dashboard"], dependencies=[Depends(require_api_key)])
@@ -340,9 +370,7 @@ _CATEGORY_SCORE_MIDPOINT = {
 
 
 @api.patch("/leads/{conversation_id}")
-async def override_lead_category(
-    conversation_id: str, category: LeadCategory
-) -> dict[str, Any]:
+async def override_lead_category(conversation_id: str, category: LeadCategory) -> dict[str, Any]:
     """Manually move a lead to a different category (the kanban drag action).
 
     Appends a new lead_scores row rather than editing one in place — scoring

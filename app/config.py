@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     redis_lock_wait_seconds: float = 5.0
     redis_lock_retry_interval_seconds: float = 0.1
 
+    # Phase D — rate limiting (Addition.md §4, initial policy table).
+    rate_limit_customer_per_minute: int = 10
+    rate_limit_customer_burst_per_5min: int = 30
+    rate_limit_dashboard_per_minute: int = 120
+
     # Dashboard API
     dashboard_api_key: str = ""
 

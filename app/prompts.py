@@ -118,3 +118,7 @@ ERROR_MESSAGE = (
 )
 
 BUSY_MESSAGE = "Still working on your last message — give me just a moment and I'll reply shortly."
+
+RATE_LIMITED_MESSAGE = (
+    "You're sending messages a bit quickly — please wait a moment before your next one."
+)

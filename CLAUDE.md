@@ -99,10 +99,23 @@ production yet; enabling each is a separate, explicit step.
   ordered acquisition, cross-conversation concurrency, lease expiry after a
   simulated crash, and rejected cross-worker release with a mismatched
   token — all confirmed live, not mocked.
-- **Not implemented yet**: rate limiting (Phase D), durable jobs (Phase E),
-  hot-read caching (Phase F), semantic FAQ cache (Phase G), CRM web research
-  (Phase H) — each behind its own settings flag (already present in
-  `app/config.py`, all default `false`).
+- **Phase D** (done): `app/rate_limit.py` — atomic fixed-window counters
+  (`INCR`+`EXPIRE` in one Lua call, no `KEYS` scan). Two independent scopes:
+  `check_customer()` (10/min steady + 30/5min burst per `channel:user_id`,
+  wired into `_process` in `app/main.py` before the agent runs, replies with
+  `prompts.RATE_LIMITED_MESSAGE`; **fails open** — a Redis outage must never
+  block a real customer) and `check_dashboard()` (120/min per API-key+route,
+  wired into `require_api_key`, returns `429` + `Retry-After`; **fails
+  closed** — an authenticated internal API that can't verify its own limit
+  should refuse, not risk abuse). The dashboard scope hashes the API key
+  before it ever becomes part of a Redis key (§3/§5: never put secrets in
+  keys). Verified live: exact window boundaries (allows N, blocks N+1),
+  fail-open when disabled, fail-closed when Redis is unreachable for the
+  dashboard scope.
+- **Not implemented yet**: durable jobs (Phase E), hot-read caching
+  (Phase F), semantic FAQ cache (Phase G), CRM web research (Phase H) — each
+  behind its own settings flag (already present in `app/config.py`, all
+  default `false`).
 
 ## What the dashboard (sibling repo) can rely on
 
