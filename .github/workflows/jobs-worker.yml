@@ -1,0 +1,60 @@
+name: Intelligence jobs worker (Phase E drain)
+
+# Free-tier alternative to a paid Render Background Worker / Cron Job — this
+# repo is public, so scheduled Actions runs cost nothing. Each run drains
+# whatever is currently pending on the Redis Stream (app/worker.py's
+# run_once() / `--once` mode) then exits; a run that dies mid-job just
+# leaves its entry pending for the next scheduled run's reclaim to pick up.
+#
+# Secrets required (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL, SUPABASE_SERVICE_KEY, OPENAI_API_KEY, OPENAI_MODEL,
+#   GROQ_API_KEY, GROQ_MODEL, QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION,
+#   REDIS_URL
+# All other Redis/jobs settings are passed as plain env vars below since
+# they aren't secret.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: jobs-worker
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: ${{ secrets.QDRANT_COLLECTION }}
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+      REDIS_ENABLED: "true"
+      REDIS_JOBS_ENABLED: "true"
+      JOBS_CONSUMER_GROUP: "intelligence-workers"
+      JOBS_CLAIM_IDLE_SECONDS: "60.0"
+      JOBS_MAX_ATTEMPTS: "5"
+      JOBS_BACKOFF_BASE_SECONDS: "2.0"
+      JOBS_BATCH_SIZE: "10"
+      LOG_LEVEL: "INFO"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Drain pending jobs
+        run: uv run python -m app.worker --once

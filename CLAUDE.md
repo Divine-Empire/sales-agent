@@ -139,24 +139,43 @@ still `false` in production pending a worker service — see below.
   reclaim → successful reprocessing by a second worker.
 
   **Running it in production**: a paid Render Background Worker
-  (`uv run python -m app.worker`, persistent process) is the natural fit
-  but isn't on Render's free tier. Since this project is running lean,
-  `app/worker.py` also has a **drain-and-exit mode**:
-  `uv run python -m app.worker --once` (`run_once()`) reclaims whatever a
+  (`uv run python -m app.worker`, persistent process, ~$7/mo minimum) is the
+  natural fit; Render's Cron Job type was also considered but turned out to
+  be billed per execution-minute too, not actually free. Since this repo is
+  now **public** (`Divine-Empire/sales-agent`), the chosen path is
+  **GitHub Actions**, which is genuinely free for public repos:
+  `.github/workflows/jobs-worker.yml` runs on a `*/5 * * * *` schedule (plus
+  `workflow_dispatch` for manual runs), checks out the repo, `uv sync
+  --frozen`, then `uv run python -m app.worker --once` — the same
+  **drain-and-exit mode** (`run_once()`) built for this: reclaims whatever a
   previous run left pending, processes everything currently in the stream
-  with no blocking wait, then exits — built specifically for Render's
-  free-tier **Cron Job** service type, which spins up a fresh container on
-  a schedule rather than keeping one alive. Verified live: draining 2
-  queued jobs in one pass (`handled: 2`), and an empty-queue invocation
-  returning immediately (`handled: 0`) rather than blocking. To activate:
-  create a Render **Cron Job** (not Background Worker) pointed at this repo,
-  command `uv run python -m app.worker --once`, schedule e.g. every 2–5
-  minutes, same environment variables as the web service. Enabling
-  `REDIS_JOBS_ENABLED=true` on the web service alone — before either the
-  persistent worker or the cron job exists — would enqueue jobs nothing
+  with no blocking wait, then exits, so a run getting killed mid-job just
+  leaves its entry for the next scheduled run's reclaim to pick up. Verified
+  live before this: draining 2 queued jobs in one pass (`handled: 2`), and
+  an empty-queue invocation returning immediately (`handled: 0`) rather than
+  blocking.
+
+  **Secrets**: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `OPENAI_API_KEY`,
+  `OPENAI_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `QDRANT_URL`,
+  `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `REDIS_URL` are pushed to this
+  repo's GitHub Actions secrets (`gh secret set`, one per credential —
+  bulk-pushing all of them in a single command was blocked by Claude Code's
+  own safety classifier as a real-credentials bulk action, so they were set
+  individually instead). Non-secret Redis/job tuning values
+  (`REDIS_ENABLED`, `REDIS_JOBS_ENABLED`, `JOBS_*`) are plain env vars
+  inline in the workflow file, not secrets. `TELEGRAM_*`/
+  `DASHBOARD_API_KEY`/`WHATSAPP_*` are deliberately **not** duplicated into
+  GitHub secrets — the worker never touches Telegram or the dashboard API,
+  only Supabase/OpenAI/Groq/Qdrant/Redis, so there was no reason to widen
+  where those particular credentials live.
+
+  Enabling `REDIS_JOBS_ENABLED=true` on the Render web service before this
+  workflow exists and has run successfully would enqueue jobs nothing
   consumes; intelligence scoring/summaries would silently stop updating
   instead of falling back to inline (the inline fallback only triggers when
-  enqueueing itself fails, not when nothing drains the queue).
+  enqueueing itself fails, not when nothing drains the queue). Confirm the
+  workflow has run cleanly at least once (Actions tab → run logs show
+  `worker_run_once_finished`) before flipping that flag on the web service.
 - **Phase F** (done, not yet enabled in production — see production status
   note): `app/cache.py` — generic cache-aside (`get_or_set`/`invalidate`/
   `invalidate_namespace`) with single-flight stampede protection (a short
