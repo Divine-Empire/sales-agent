@@ -28,7 +28,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app import analytics, documents, intelligence, prompts, redis_client, store
+from app import analytics, dedupe, documents, intelligence, prompts, redis_client, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
@@ -164,6 +164,14 @@ async def telegram_webhook(
         update = await request.json()
     except Exception:
         log.warning("webhook_bad_json")
+        return JSONResponse({"ok": True})
+
+    # Claim the update before doing anything else. A duplicate delivery (a
+    # Telegram retry) acks 200 immediately without being processed again —
+    # same response Telegram would get from a fresh delivery, so it has no
+    # reason to retry further.
+    update_id = update.get("update_id")
+    if update_id is not None and not await dedupe.claim_update(update_id):
         return JSONResponse({"ok": True})
 
     # Record every chat the bot is spoken to in, so group ids are discoverable
