@@ -112,10 +112,37 @@ production yet; enabling each is a separate, explicit step.
   keys). Verified live: exact window boundaries (allows N, blocks N+1),
   fail-open when disabled, fail-closed when Redis is unreachable for the
   dashboard scope.
-- **Not implemented yet**: durable jobs (Phase E), hot-read caching
-  (Phase F), semantic FAQ cache (Phase G), CRM web research (Phase H) — each
-  behind its own settings flag (already present in `app/config.py`, all
-  default `false`).
+- **Phase E** (done, not yet running in production — needs a second Render
+  service): `app/jobs.py` (envelope + `enqueue()`, one Redis Stream
+  `de:v1:stream:jobs` + dead-letter stream) and `app/worker.py` (standalone
+  consumer-group worker; **not** part of the web dyno — run separately via
+  `uv run python -m app.worker`). `app/main.py`'s post-reply intelligence
+  call now does `jobs.enqueue(...)`, falling back to the original inline
+  `intelligence.analyse()` call if enqueueing returns `False` (jobs disabled
+  or Redis down) — same behavior as before this phase either way. Only
+  intelligence analysis is queued, per the plan; the reply itself and ops
+  notifications stay synchronous. A processed-job guard (`jobs.py`,
+  `already_processed`/`mark_processed`) prevents a retried delivery from
+  double-scoring a lead — **the guard is set only after the handler
+  succeeds**, not on first sight, otherwise a failed first attempt would
+  wrongly block its own retry (a real bug caught and fixed during live
+  testing against Redis Cloud). Failed jobs retry with bounded exponential
+  backoff up to `JOBS_MAX_ATTEMPTS`, then move to the dead-letter stream,
+  observable via `GET /api/jobs/dead-letter-count`. A crashed worker's
+  unacked entries are reclaimed by `_reclaim_stale` (`xautoclaim`, note the
+  redis-py kwarg is `start_id`, not `start`) after `JOBS_CLAIM_IDLE_SECONDS`.
+  Verified live against Redis Cloud: enqueue → consume → ack; idempotent
+  skip on a genuine duplicate delivery but NOT on a legitimate retry;
+  retry-then-succeed; retry exhaustion → dead-letter; crashed-worker
+  reclaim → successful reprocessing by a second worker. To actually run
+  this in production, create a Render **Background Worker** service (not
+  a second web service) with start command `uv run python -m app.worker`,
+  pointed at the same repo/env — that hasn't been done yet, so enabling
+  `REDIS_JOBS_ENABLED=true` on the web service alone would enqueue jobs
+  nothing ever consumes.
+- **Not implemented yet**: hot-read caching (Phase F), semantic FAQ cache
+  (Phase G), CRM web research (Phase H) — each behind its own settings flag
+  (already present in `app/config.py`, all default `false`).
 
 ## What the dashboard (sibling repo) can rely on
 

@@ -87,6 +87,15 @@ class Settings(BaseSettings):
     rate_limit_customer_burst_per_5min: int = 30
     rate_limit_dashboard_per_minute: int = 120
 
+    # Phase E — durable post-reply jobs (Redis Streams + consumer group).
+    jobs_consumer_group: str = "intelligence-workers"
+    jobs_consumer_name: str = ""  # blank = derive one at worker startup
+    jobs_claim_idle_seconds: float = 60.0
+    jobs_max_attempts: int = 5
+    jobs_backoff_base_seconds: float = 2.0
+    jobs_block_ms: int = 5000
+    jobs_batch_size: int = 10
+
     # Dashboard API
     dashboard_api_key: str = ""
 

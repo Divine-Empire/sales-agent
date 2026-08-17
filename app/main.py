@@ -28,7 +28,17 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app import analytics, dedupe, documents, intelligence, prompts, rate_limit, redis_client, store
+from app import (
+    analytics,
+    dedupe,
+    documents,
+    intelligence,
+    jobs,
+    prompts,
+    rate_limit,
+    redis_client,
+    store,
+)
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
@@ -144,9 +154,14 @@ async def _process(update: dict[str, Any]) -> None:
 
         # Scoring, intent and summary (BRD §9-§11, §14) run only after the
         # customer has their reply — they are an LLM call the customer never
-        # sees, and inline they would add seconds to every turn.
+        # sees, and inline they would add seconds to every turn. Durable via
+        # the job queue (Phase E) when enabled; falls back to the original
+        # inline call otherwise, so a queue outage degrades rather than
+        # silently drops the analysis.
         if reply.model != "command":
-            await intelligence.analyse(incoming.conversation_id)
+            queued = await jobs.enqueue(jobs.JOB_TYPE_INTELLIGENCE, incoming.conversation_id)
+            if not queued:
+                await intelligence.analyse(incoming.conversation_id)
     except Exception:
         log.exception(
             "webhook_processing_failed",
@@ -347,6 +362,14 @@ async def ai_logs(conversation_id: str | None = None, limit: int = 100) -> dict[
     """AI conversation logs (BRD §16) — model, tokens, latency, retrieval."""
     rows = await store.list_ai_logs(conversation_id=conversation_id, limit=limit)
     return {"count": len(rows), "logs": rows}
+
+
+@api.get("/jobs/dead-letter-count")
+async def jobs_dead_letter_count() -> dict[str, Any]:
+    """Exposed per Addition.md Phase E ('dead-letter jobs are observable') —
+    a non-zero count means the intelligence worker is failing repeatedly on
+    something and needs a look, not that a customer went unanswered."""
+    return {"dead_letter_count": await jobs.dead_letter_count()}
 
 
 @api.patch("/handovers/{handover_id}")
