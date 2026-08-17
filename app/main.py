@@ -28,7 +28,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app import analytics, documents, intelligence, prompts, store
+from app import analytics, documents, intelligence, prompts, redis_client, store
 from app.agent import handle_message
 from app.channels import TelegramAdapter, build_notification
 from app.config import settings
@@ -47,6 +47,7 @@ _background: set[asyncio.Task[None]] = set()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    redis_ok = await redis_client.ping() if settings.redis_enabled else None
     log.info(
         "startup",
         extra={
@@ -55,9 +56,16 @@ async def lifespan(_: FastAPI):
             "collection": settings.qdrant_collection,
             "supabase": bool(settings.supabase_url),
             "telegram": bool(settings.telegram_bot_token),
+            "redis_enabled": settings.redis_enabled,
+            "redis_connected": redis_ok,
         },
     )
+    if settings.redis_enabled and not redis_ok:
+        # Loud, not fatal — the whole point of Phase A is that a Redis outage
+        # must never stop the agent from serving chats.
+        log.warning("redis_unavailable_at_startup")
     yield
+    await redis_client.close()
     log.info("shutdown")
 
 
@@ -69,6 +77,17 @@ async def health() -> dict[str, Any]:
     """Render health check. Deliberately dependency-free: reporting unhealthy
     because Qdrant is briefly slow would take the whole service down."""
     return {"status": "ok", "service": "sales-agent"}
+
+
+@app.get("/ready")
+async def ready() -> dict[str, Any]:
+    """Dependency-aware diagnostic, separate from /health on purpose
+    (Addition.md Phase A). Render's health check must never fail because
+    Redis is down; this endpoint is for operators who want to see it anyway."""
+    return {
+        "status": "ok",
+        "redis": await redis_client.readiness(),
+    }
 
 
 # ---------------------------------------------------------------------------

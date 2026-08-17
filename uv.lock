@@ -204,6 +204,28 @@ wheels = [
 ]
 
 [[package]]
+name = "hiredis"
+version = "3.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/1e/4729c6fcecb653da6e4877302ed654c24ebb297fe796deee44139bd76179/hiredis-3.4.1.tar.gz", hash = "sha256:2bbb55435506e481d270df8d0b29dd94acb85d11d71df4b8efce23849a4d0bb7", size = 137434, upload-time = "2026-08-07T10:23:01.235Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/9a/944db038f55c8c3141b29c897b9ef4d930b1bb9ef387d34bc80e1ef78b50/hiredis-3.4.1-cp312-cp312-macosx_10_15_universal2.whl", hash = "sha256:fd5f86d937ecb5aa1dfed21d774f5ae8f8379eed607b1d9ab0ab6e80c4717981", size = 140842, upload-time = "2026-08-07T10:21:21.652Z" },
+    { url = "https://files.pythonhosted.org/packages/61/93/53617e27de296ba7734451d7261532b5c6a03492c3587e428163323980f0/hiredis-3.4.1-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:7630086181d75cd4e377fbbb00ed903619121bcf30b7ae84250366b2717ddebf", size = 75160, upload-time = "2026-08-07T10:21:22.67Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/86/e34e08f21b3dec802578768a9cb1d0fcfa82a83e2b69942331058170c3b0/hiredis-3.4.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c8efc144cc467c62c14cd49d276f1aaec5232ba46300164d59a5fdb68ba77fff", size = 71952, upload-time = "2026-08-07T10:21:23.589Z" },
+    { url = "https://files.pythonhosted.org/packages/38/d0/58719bab08a0b9e8e134e18f43eddb5b29e0e8f7edb449ae564312e9323e/hiredis-3.4.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:66953abbda35703727a596bd3a83e86acc4da781e258780c3d85dd6acc1f39f9", size = 306806, upload-time = "2026-08-07T10:21:24.666Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/2c/71f3ffe234669c848e92fdad4f79dca1c5e1bd57b547a55fbf41a86bed45/hiredis-3.4.1-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.manylinux_2_28_ppc64le.whl", hash = "sha256:7b083a1deee1124a7c47baf1d3db85251f4ecd9812a974f586d59ef7d28f6007", size = 339851, upload-time = "2026-08-07T10:21:25.91Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/f1/971068f1e80ca8b84c188eb1afc4eb4067f8e9e6cb574cc0afd8b737ad0e/hiredis-3.4.1-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl", hash = "sha256:5c3e191e6514c54f68a0b3d2b18aa6e73885393be16a31ae74b15c12b544cbaa", size = 351783, upload-time = "2026-08-07T10:21:27.176Z" },
+    { url = "https://files.pythonhosted.org/packages/78/b2/4662f0f9218d82d1fb5a58cfa8f6a6742cc53f9c25a36db88667a2ef4510/hiredis-3.4.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7a2cd31cba425ae954abeafa5dd74552e5ffa61661d3c8098cc66787330c1779", size = 313337, upload-time = "2026-08-07T10:21:28.544Z" },
+    { url = "https://files.pythonhosted.org/packages/31/c3/145c5a574ac98f1a32cd0473c1f699ed272de44e240f14b7306ccce4e1c0/hiredis-3.4.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:742b4f7ce4b28820ef3fd45c7866f09e07dbf1904895eecd56b482eaa7bd26f5", size = 301233, upload-time = "2026-08-07T10:21:29.755Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/09/fa282ff2c5a54ba356312ce49dd276b9dc3db00b8ac6667e93f652347354/hiredis-3.4.1-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:90de946ceac709797efcf3278e3f004f2a60ebd6bb5761bc35d7212d56fc1e5a", size = 331602, upload-time = "2026-08-07T10:21:31.669Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/bd/a0102c1394c63e1f2b2550e96c3ab262afeb017ff007effa6d99635d96a6/hiredis-3.4.1-cp312-cp312-musllinux_1_2_s390x.whl", hash = "sha256:404ce858750c6e31d420818d79bceda89869f521c990b01e7ce8fcc95916eb8b", size = 333175, upload-time = "2026-08-07T10:21:32.83Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/ca/19c1ebd6b75c5811d77e8d17a2adb9f863c7642a3d5ac129be0d2d3bed78/hiredis-3.4.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:9f2656e2c11339e7e93df3c0d73c442129fb1381fb709706848f1b49e85677d1", size = 311997, upload-time = "2026-08-07T10:21:33.868Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/2b/91f4a42d123b2660a3286e5b853f787e4ae3088b45d53b2c0b0079c6c5c3/hiredis-3.4.1-cp312-cp312-win32.whl", hash = "sha256:e333eb85c9ab16538d43b2e4e1fa564244d3f0c4a8a84e7c640812419b597180", size = 38685, upload-time = "2026-08-07T10:21:34.904Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/02/d5df4b12366a15e44857364af52db80c032eac6da4b9ffd644df647fa91b/hiredis-3.4.1-cp312-cp312-win_amd64.whl", hash = "sha256:b0d11936e377f305024953ae25ba52ae48edc26fe49f47af1e934f642deb3ed6", size = 40413, upload-time = "2026-08-07T10:21:35.963Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/f8/f3dadc80ed4f3aeabad0ef309c207ed93b6ce602557ce77ecd73c75b126f/hiredis-3.4.1-cp312-cp312-win_arm64.whl", hash = "sha256:50d821b6195c9a4ba5cda44d950ba6205fdac5a7cf03e1ac4cdf0294f2df886c", size = 36917, upload-time = "2026-08-07T10:21:37.016Z" },
+]
+
+[[package]]
 name = "hpack"
 version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -655,6 +677,20 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
+]
+
+[package.optional-dependencies]
+hiredis = [
+    { name = "hiredis" },
+]
+
+[[package]]
 name = "ruff"
 version = "0.16.2"
 source = { registry = "https://pypi.org/simple" }
@@ -693,6 +729,7 @@ dependencies = [
     { name = "python-docx" },
     { name = "python-multipart" },
     { name = "qdrant-client" },
+    { name = "redis", extra = ["hiredis"] },
     { name = "supabase" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -713,6 +750,7 @@ requires-dist = [
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "qdrant-client", specifier = ">=1.12.0" },
+    { name = "redis", extras = ["hiredis"], specifier = ">=5.0.0" },
     { name = "supabase", specifier = ">=2.10.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]

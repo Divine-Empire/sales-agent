@@ -219,3 +219,4 @@ __marimo__/
 
 # Project docs — source BRD and generated plans, kept local
 docs/
+.claude/

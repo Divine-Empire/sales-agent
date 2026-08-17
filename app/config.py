@@ -56,6 +56,27 @@ class Settings(BaseSettings):
     whatsapp_api_version: str = "v21.0"
     whatsapp_timeout_seconds: float = 10.0
 
+    # Redis (optional operational layer — Addition.md).
+    #
+    # Redis is never the system of record. Every feature here must be safe to
+    # disable or fail: the agent reads/writes Supabase either way. Each
+    # feature flag defaults to false and is turned on one phase at a time
+    # (Addition.md §8) — Phase A only wires the client and instrumentation;
+    # nothing below actually changes behavior until its own phase lands.
+    redis_url: str = ""
+    redis_enabled: bool = False
+    redis_connect_timeout_seconds: float = 2.0
+    redis_read_timeout_seconds: float = 1.0
+    redis_max_connections: int = 20
+
+    # Per-feature flags (Phase B-F). Independently toggleable so a single
+    # feature can be rolled back without touching the others.
+    redis_dedupe_enabled: bool = False
+    redis_locks_enabled: bool = False
+    redis_rate_limit_enabled: bool = False
+    redis_jobs_enabled: bool = False
+    redis_cache_enabled: bool = False
+
     # Dashboard API
     dashboard_api_key: str = ""
 
