@@ -39,6 +39,15 @@ jobs:
       REDIS_URL: ${{ secrets.REDIS_URL }}
       REDIS_ENABLED: "true"
       REDIS_JOBS_ENABLED: "true"
+      # Must match the web service's REDIS_CACHE_ENABLED — this worker calls
+      # the same store.upsert_summary()/upsert_customer() functions, whose
+      # cache invalidation is a no-op if this flag disagrees with the web
+      # service's, leaving the web service serving a stale cached summary
+      # after this worker updates the real row. (A real bug caught live:
+      # the worker ran successfully and wrote a fresh summary to Supabase,
+      # but the dashboard kept showing an old one for the rest of the
+      # 30-minute cache TTL because this env var was missing here.)
+      REDIS_CACHE_ENABLED: "true"
       JOBS_CONSUMER_GROUP: "intelligence-workers"
       JOBS_CLAIM_IDLE_SECONDS: "60.0"
       JOBS_MAX_ATTEMPTS: "5"
