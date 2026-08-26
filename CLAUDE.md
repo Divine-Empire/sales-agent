@@ -11,10 +11,11 @@ The AI sales agent for **Divine Empire India Pvt. Ltd.** (industrial/
 construction machinery). FastAPI backend on Render, Supabase for canonical
 data, Qdrant for product-knowledge RAG, GPT-4o with a Groq fallback.
 
-Live channel today: **Telegram**. WhatsApp Business Cloud API credentials
-have been provided by the client but **the adapter is not yet implemented —
-do not build or enable it without explicit instruction.** See "WhatsApp
-status" below; this is the most important boundary in this file.
+Live channels: **Telegram** and, since 2026-08-26, **WhatsApp** — the latter
+through the existing `whatsapp-portal`, never Meta directly. Read the
+"WhatsApp status" section below before touching anything WhatsApp-related:
+three systems share one phone number and one Meta webhook slot, which is
+still the most important constraint in this file.
 
 Repo: `Divine-Empire/sales-agent` (primary remote `divine`) and
 `teamai-botivate/sales-agent` (`origin`) — push to both.
@@ -28,10 +29,13 @@ Deployed: `https://sales-agent-956w.onrender.com`.
 → reply. `app/llm.py` is the only module that calls OpenAI/Groq. `app/rag.py`
 does Qdrant search/ingestion. `app/store.py` is the only module that talks to
 Supabase. `app/intelligence.py` does post-reply lead scoring/intent/summary.
-`app/channels.py` holds `TelegramAdapter` (live) and `WhatsAppAdapter`
-(stub — raises `NotImplementedError`, fully documented mapping in its
-docstring). `app/redis_client.py` is the optional operational layer (see
-below). `app/analytics.py` backs the dashboard's aggregate endpoints.
+`app/channels.py` holds `TelegramAdapter` (live), `WhatsAppPortalAdapter`
+(live — sends via the portal's API) and `WhatsAppAdapter` (a deliberate
+unimplemented stub documenting the direct-to-Meta path, kept for reference;
+`ADAPTERS` does not use it). `app/whatsapp_portal.py` is the read side of the
+portal relationship, backing the dashboard's WhatsApp tab.
+`app/redis_client.py` is the optional operational layer (see below).
+`app/analytics.py` backs the dashboard's aggregate endpoints.
 
 `conversation_id` is always `"{channel}:{user_id}"` (e.g.
 `telegram:5377541635`) — stable, never rotates, is the join key across every
@@ -63,10 +67,11 @@ reference only — not shipped, ask if you need it summarized).
   webhook (or vice versa). This is not implemented and is not a "just wire it
   up" task — it needs a coordinated cutover decision (replace the existing
   webhook, or get a second number) that only the user makes.
-- Explicit instruction as of 2026-08-17: **wait for the user's go-ahead**
-  before implementing `WhatsAppAdapter`, registering any webhook, or sending
-  anything through the Cloud API. Config plumbing (`app/config.py` settings,
-  `.env.example` docs) is done; the adapter itself is untouched.
+- Instruction as of 2026-08-17 (now satisfied, kept for the reasoning): wait
+  for the user's go-ahead before sending anything through the Cloud API. The
+  go-ahead came 2026-08-26 — but note what still holds: **do not register a
+  Meta webhook for this number from this service.** The portal owns that slot.
+  See the correction below for how inbound actually arrives.
 - **Superseded 2026-08-26 — WhatsApp is now wired up, but NOT the way the
   stub anticipated.** The user approved connecting to the existing systems
   rather than going direct to Meta. What was built:
@@ -352,6 +357,21 @@ brand-new threads) via `store.list_conversations`; last-message and summary
 data are merged in with two follow-up queries scoped to just the returned
 conversation ids, same shape as the rest of `app/store.py`. Verified against
 the live production Supabase — returns the one real conversation correctly.
+
+**Portal pagination — a real trap, documented so nobody rediscovers it.**
+`app/whatsapp_portal.py`'s `list_conversations` accepts a `limit` above the
+portal's per-response ceiling and assembles it from several cursor-paged
+calls (`_PORTAL_PAGE_MAX = 500`). That page size is deliberate and must not be
+raised to 1000: Supabase clamps any response to 1000 rows, and the portal
+derives `hasMore` by over-fetching one row (`limit + 1`), so requesting
+exactly 1000 gets the probe row clamped away and `hasMore` reads **false**
+even with ~11,700 conversations remaining. A first attempt at 1000 stalled
+dead at 1000 rows. Rows are also de-duplicated by id, because conversations
+sharing a `last_message_at` can straddle a cursor boundary and repeat. A
+mid-sequence portal failure keeps the pages already collected rather than
+discarding a partly-built list. (This ceiling bug is the portal's, not ours —
+its own inbox would stall at 1000 on infinite scroll too. Left unfixed there
+deliberately: working around it on this side was the lower-risk change.)
 
 `GET /api/whatsapp/conversations` and
 `GET /api/whatsapp/conversations/{id}` are read-only proxies over the
