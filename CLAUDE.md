@@ -79,26 +79,57 @@ reference only — not shipped, ask if you need it summarized).
     is known; Meta's later delivery/read webhooks match on exactly that
     column. Sending from here would leave the portal's inbox showing customer
     questions with no answers, and its status updates unmatched.
-  - `POST /webhooks/whatsapp-inbound` (`app/main.py`) receives messages
-    forwarded by `app_scripts/app.gs`. **Meta's webhook registration stays
-    with the Apps Script** — untouched, so the marketing pipeline's reply
-    tracking is unaffected and no coordinated cutover was needed.
-  - `_forwardToSalesAgent()` in `app_scripts/app.gs` is the forward, called
-    at the end of `_processMessages` after all Sheet bookkeeping. Config via
-    Script Properties (`SALES_AGENT_URL`, `SALES_AGENT_SECRET`); unset URL
-    disables it. Fire-and-forget inside try/catch — an agent outage cannot
-    break the live webhook. Text-only: button/list taps are campaign clicks
-    the Sheet flow owns, so the agent does not talk over its own campaign.
+  - `POST /webhooks/whatsapp-inbound` (`app/main.py`) receives forwarded
+    inbound messages. **The forward comes from `whatsapp-portal`'s webhook
+    route, NOT from the Apps Script** — see the correction below.
+  - `forwardToSalesAgent()` in
+    `whatsapp-portal/src/app/api/webhook/[userId]/route.ts` is the trigger,
+    called at the end of the per-message loop. Config via that project's
+    Vercel env (`SALES_AGENT_URL`, `SALES_AGENT_SECRET`); unset URL is the
+    kill switch. Fire-and-forget, 8s timeout, errors swallowed — the message
+    is already stored, so the agent can never delay Meta's ack. Text-only and
+    new-messages-only (`isNewMessage && !msgInsertError`), so campaign button
+    taps and Meta webhook retries do not trigger AI replies.
+  - **Correction, 2026-08-26 — where Meta actually points.** An earlier
+    version of this integration put the forward in `app_scripts/`'s
+    `_processMessages`, on the assumption that the Apps Script's `doPost` was
+    Meta's live webhook. **That was wrong and the forward would never have
+    fired.** Verified against `whatsapp-portal`'s live Supabase: it has
+    current `direction=inbound` rows with `source='internal'` and
+    `message_type` values (`button`, `unsupported`) that only the portal's own
+    webhook switch produces. So **Meta → whatsapp-portal**, and the real flow
+    is: Meta → portal webhook → portal Supabase → `syncResponsesIncremental`
+    (in the separate "WH Script Buttons" Apps Script project, bound to the
+    "Official Webhook" Sheet `1_r5eK…`) pulls the portal's `responses` view
+    into that Sheet's `RESPONSES` tab. The Apps Script `doPost` in
+    `app_scripts/code.gs` is **legacy/dead for inbound traffic**; the
+    `app_scripts/` edits were reverted, and that file now matches
+    `app_scripts/current_active_system/code.gs` exactly. Do not re-add a
+    forward there.
+  - **`app_scripts/` layout note**: the live bulk-send script is `code.gs`
+    (not `app.gs` as older notes said), `current_active_system/` is the
+    authoritative export to diff against, and `official_webhook_code.gs` is
+    the *other* project's sync script. `code.gs` and
+    `current_active_system/code.gs` had genuinely diverged (the active one
+    has an `Upload Image / video` menu item wiring `showFileUploadDialog`
+    from `file.gs`) — always diff before pasting anything into Apps Script.
   - The original `WhatsAppAdapter` stub is deliberately left in place,
     unimplemented, documenting the direct-to-Meta path if it is ever wanted.
-  - **Phone format is the join key across all three systems.** Forward the
-    `91`-prefixed form (`app.gs`'s `_normalizePhone`, which now matches the
-    portal's `normalizePhoneNumber` exactly). `app.gs`'s `_cleanPhone` strips
-    the `91` for Sheet row matching — feeding its output to the portal would
-    create a duplicate contact and split the thread in the operator's inbox.
+  - **Phone format is the join key across all three systems.** The portal
+    forwards its already-normalized `phoneNumber` (91-prefixed, from its own
+    `normalizePhoneNumber`), which is how it stores contacts and how the agent
+    keys `conversation_id`. Note `app_scripts/`'s `_cleanPhone` *strips* the
+    `91` for Sheet row matching — never feed that form to the portal or the
+    agent, it would create a duplicate contact and split the thread.
   - Gated by `WHATSAPP_AGENT_ENABLED` (default **false**) plus
     `WHATSAPP_INBOUND_SECRET`. Shipped dark: the endpoint acks 200 but runs
     nothing until the flag is set on Render.
+  - **Go-live order**: (1) deploy the portal change with `SALES_AGENT_URL`
+    set — forwards start arriving, agent stays silent, look for
+    `whatsapp_inbound_disabled` in Render logs to confirm wiring; (2) set
+    `WHATSAPP_INBOUND_SECRET` on Render *and* `SALES_AGENT_SECRET` on the
+    portal to the same value, plus `WHATSAPP_AGENT_ENABLED=true`. Kill switch
+    is unsetting `SALES_AGENT_URL` on the portal, or the flag on Render.
   - Verified locally with the portal mocked: forwarded message → correct
     `whatsapp:<phone>` conversation → RAG hit → Hinglish reply matching the
     customer's Hinglish question → exactly the two portal calls in order.
