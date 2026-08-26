@@ -51,118 +51,89 @@ Supabase project `djawztrswbstqwceznnz` (Singapore region). Migrations in
 rows only). Full schema reasoning in `docs/data-model.md` (gitignored, local
 reference only — not shipped, ask if you need it summarized).
 
-## WhatsApp status — read this before touching anything WhatsApp-related
+## WhatsApp — live since 2026-08-26, read this before touching it
 
-- The client's real WhatsApp Business Cloud API credentials (access token,
-  phone number ID, WABA ID) **are already in `.env`**, added 2026-08-16.
-- **The phone number is the same one currently served by a separate, live,
-  already-in-production system** — a Google Apps Script
-  (`app_script/app.gs`, reference copy only, not part of this app's runtime)
-  that receives Meta's webhook directly and does bulk template sending from a
-  Google Sheet, plus `whatsapp-portal-divine.vercel.app` (a completely
-  separate Next.js + Supabase project, repo `Divine-Empire/whatsapp-portal`,
-  its own Supabase project `zpkikvgmmbtekbcuqahf` — not ours).
-- Meta allows **one webhook URL per phone number.** Registering this app's
-  webhook for that number would silently break the Apps Script's live
-  webhook (or vice versa). This is not implemented and is not a "just wire it
-  up" task — it needs a coordinated cutover decision (replace the existing
-  webhook, or get a second number) that only the user makes.
-- Instruction as of 2026-08-17 (now satisfied, kept for the reasoning): wait
-  for the user's go-ahead before sending anything through the Cloud API. The
-  go-ahead came 2026-08-26 — but note what still holds: **do not register a
-  Meta webhook for this number from this service.** The portal owns that slot.
-  See the correction below for how inbound actually arrives.
-- **Superseded 2026-08-26 — WhatsApp is now wired up, but NOT the way the
-  stub anticipated.** The user approved connecting to the existing systems
-  rather than going direct to Meta. What was built:
-  - `WhatsAppPortalAdapter` (`app/channels.py`) is the live adapter and what
-    `ADAPTERS[Channel.WHATSAPP]` resolves to. Outbound calls
-    `whatsapp-portal`'s own `POST /api/conversations/get-or-create` then
-    `POST /api/send-message` — **never Meta directly**. Reason: the portal's
-    Supabase only gains rows from the portal's own code, and it writes the
-    `wa_message_id` inline with the send because that is the only moment it
-    is known; Meta's later delivery/read webhooks match on exactly that
-    column. Sending from here would leave the portal's inbox showing customer
-    questions with no answers, and its status updates unmatched.
-  - `POST /webhooks/whatsapp-inbound` (`app/main.py`) receives forwarded
-    inbound messages. **The forward comes from `whatsapp-portal`'s webhook
-    route, NOT from the Apps Script** — see the correction below.
-  - `forwardToSalesAgent()` in
-    `whatsapp-portal/src/app/api/webhook/[userId]/route.ts` is the trigger,
-    called at the end of the per-message loop. Config via that project's
-    Vercel env (`SALES_AGENT_URL`, `SALES_AGENT_SECRET`); unset URL is the
-    kill switch. Fire-and-forget, 8s timeout, errors swallowed — the message
-    is already stored, so the agent can never delay Meta's ack. Text-only and
-    new-messages-only (`isNewMessage && !msgInsertError`), so campaign button
-    taps and Meta webhook retries do not trigger AI replies.
-  - **Correction, 2026-08-26 — where Meta actually points.** An earlier
-    version of this integration put the forward in `app_scripts/`'s
-    `_processMessages`, on the assumption that the Apps Script's `doPost` was
-    Meta's live webhook. **That was wrong and the forward would never have
-    fired.** Verified against `whatsapp-portal`'s live Supabase: it has
-    current `direction=inbound` rows with `source='internal'` and
-    `message_type` values (`button`, `unsupported`) that only the portal's own
-    webhook switch produces. So **Meta → whatsapp-portal**, and the real flow
-    is: Meta → portal webhook → portal Supabase → `syncResponsesIncremental`
-    (in the separate "WH Script Buttons" Apps Script project, bound to the
-    "Official Webhook" Sheet `1_r5eK…`) pulls the portal's `responses` view
-    into that Sheet's `RESPONSES` tab. The Apps Script `doPost` in
-    `app_scripts/code.gs` is **legacy/dead for inbound traffic**; the
-    `app_scripts/` edits were reverted, and that file now matches
-    `app_scripts/current_active_system/code.gs` exactly. Do not re-add a
-    forward there.
-  - **`app_scripts/` layout note**: the live bulk-send script is `code.gs`
-    (not `app.gs` as older notes said), `current_active_system/` is the
-    authoritative export to diff against, and `official_webhook_code.gs` is
-    the *other* project's sync script. `code.gs` and
-    `current_active_system/code.gs` had genuinely diverged (the active one
-    has an `Upload Image / video` menu item wiring `showFileUploadDialog`
-    from `file.gs`) — always diff before pasting anything into Apps Script.
-  - The original `WhatsAppAdapter` stub is deliberately left in place,
-    unimplemented, documenting the direct-to-Meta path if it is ever wanted.
-  - **Phone format is the join key across all three systems.** The portal
-    forwards its already-normalized `phoneNumber` (91-prefixed, from its own
-    `normalizePhoneNumber`), which is how it stores contacts and how the agent
-    keys `conversation_id`. Note `app_scripts/`'s `_cleanPhone` *strips* the
-    `91` for Sheet row matching — never feed that form to the portal or the
-    agent, it would create a duplicate contact and split the thread.
-  - Gated by `WHATSAPP_AGENT_ENABLED` (default **false**) plus
-    `WHATSAPP_INBOUND_SECRET`. Shipped dark: the endpoint acks 200 but runs
-    nothing until the flag is set on Render.
-  - **Go-live order**: (1) deploy the portal change with `SALES_AGENT_URL`
-    set — forwards start arriving, agent stays silent, look for
-    `whatsapp_inbound_disabled` in Render logs to confirm wiring; (2) set
-    `WHATSAPP_INBOUND_SECRET` on Render *and* `SALES_AGENT_SECRET` on the
-    portal to the same value, plus `WHATSAPP_AGENT_ENABLED=true`. Kill switch
-    is unsetting `SALES_AGENT_URL` on the portal, or the flag on Render.
-  - Verified locally with the portal mocked: forwarded message → correct
-    `whatsapp:<phone>` conversation → RAG hit → Hinglish reply matching the
-    customer's Hinglish question → exactly the two portal calls in order.
-    Also verified it degrades correctly (failed conversation lookup still
-    sends; failed send returns False) and that a non-object JSON body is
-    rejected rather than crashing. **No message has been sent to a real
-    customer yet.**
-- Do not read WhatsApp portal secrets. If investigating, its Vercel env vars
-  for `WHATSAPP_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`/`WHATSAPP_WABA_ID` are
-  marked Sensitive (write-only via CLI) — that's intentional platform access
-  control, not a puzzle to route around.
-- **`whatsapp-portal` now exists as a local sibling directory**
-  (`../whatsapp-portal`, repo `Divine-Empire/whatsapp-portal`) and was fully
-  code-audited 2026-08-26 — see its own `CLAUDE.md` for the complete
-  breakdown. Short version: it is a real, mature, feature-complete WhatsApp
-  Business inbox (chat UI, template send/track with delivery status, media,
-  the Google-Sheets bulk-send bridge that `app_script/app.gs` here talks to
-  via `/api/sync-sheet`, a keyword-based interest classifier) — not a stub.
-  It has its own Supabase project and its own webhook registration; nothing
-  about that changes the constraint above. Its deployment was independently
-  confirmed live via Vercel CLI the same day (Vercel project
-  `whatsapp-portal`, team `mis-thedivineemps-projects` — same team as
-  `sales-agent-dashboard`; most recent deploy 2 days old at the time). As of
-  2026-08-26 the plan is to
-  surface it inside `sales-agent-dashboard`'s WhatsApp tab, but the
-  integration shape is not yet decided — see that repo's `CLAUDE.md` for
-  the open question. This backend (`sales-agent`) is not currently expected
-  to be part of that integration; if that changes, update this section.
+**Current state.** WhatsApp is a live channel. The AI answers inbound
+customer messages automatically. Three systems share **one phone number**
+(`+91 70242 22373`, Meta phone_number_id `945246702014228`) and Meta permits
+exactly **one webhook URL per number** — that slot belongs to
+`whatsapp-portal`. Everything below follows from that.
+
+**The flow, end to end:**
+
+```
+customer → Meta → whatsapp-portal /api/webhook/{userId}   (owns the webhook)
+                    ├─ stores the message in its own Supabase
+                    └─ forwardToSalesAgent() ──→ this service
+                                                  POST /webhooks/whatsapp-inbound
+                                                    ↓ agent decides a reply
+                                                  portal /api/send-message → customer
+```
+
+- **Inbound**: `POST /webhooks/whatsapp-inbound` (`app/main.py`) receives a
+  small JSON body forwarded by `forwardToSalesAgent()` in
+  `whatsapp-portal/src/app/api/webhook/[userId]/route.ts`. Text-only and
+  new-messages-only, so campaign button taps and Meta webhook retries do not
+  trigger AI replies. Config on the portal's Vercel env
+  (`SALES_AGENT_URL`, `SALES_AGENT_SECRET`); unsetting `SALES_AGENT_URL` is
+  the kill switch. Gated here by `WHATSAPP_AGENT_ENABLED` +
+  `WHATSAPP_INBOUND_SECRET` (both live on Render).
+- **Outbound**: `WhatsAppPortalAdapter` (`app/channels.py`) calls the portal's
+  `/api/conversations/get-or-create` then `/api/send-message` — **never Meta
+  directly.** The portal's Supabase only gains rows from the portal's own
+  code, and it writes `wa_message_id` inline with the send because that is
+  the only moment it is known; Meta's later delivery/read webhooks match on
+  exactly that column. Sending from here would leave the portal's inbox
+  showing customer questions with no answers and its status updates
+  unmatched. The conversation id is cached (24h) — it never rotates, and
+  resolving it cost 1.7–4.1s per reply.
+- **Reads**: `app/whatsapp_portal.py` + `/api/whatsapp/conversations[/{id}]`
+  back the dashboard's WhatsApp tab, so that project needs no portal
+  credentials. See "What the dashboard can rely on" below.
+
+**Things that will bite you:**
+
+- **Do not register a Meta webhook for this number from this service.** It
+  would silently break the portal's live webhook, taking down both the
+  marketing pipeline's reply tracking and the AI. A second consumer needs a
+  second number, or a coordinated cutover only the user decides.
+- **`app_scripts/` does NOT receive Meta traffic.** Its `doPost` is
+  legacy/dead for inbound. An earlier version of this integration put the
+  forward there on that assumption and it would never have fired — verified
+  against the portal's live Supabase, which holds current `direction=inbound`
+  rows with `source='internal'` and `message_type` values (`button`,
+  `unsupported`) that only the portal's own webhook switch produces. The real
+  Sheet path is: portal Supabase → `syncResponsesIncremental` (separate "WH
+  Script Buttons" Apps Script project, bound to the "Official Webhook" Sheet
+  `1_r5eK…`) → that Sheet's `RESPONSES` tab. Do not re-add a forward to
+  `app_scripts/`.
+- **`app_scripts/` layout**: the live bulk-send script is `code.gs` (not
+  `app.gs`, as older notes said), `current_active_system/` is the
+  authoritative export to diff against, and `official_webhook_code.gs`
+  belongs to the *other* Apps Script project. The two `code.gs` copies have
+  genuinely diverged before — always diff before pasting anything in.
+- **Phone format is the join key across all three systems.** Use the
+  91-prefixed form (`919876543210`), which is what the portal stores and what
+  this service keys `conversation_id` on. `app_scripts/`'s `_cleanPhone`
+  *strips* the `91` for Sheet row matching — never feed that form to the
+  portal or the agent; it creates a duplicate contact and splits the thread.
+- **The `WhatsAppAdapter` stub in `app/channels.py` is deliberately left
+  unimplemented**, documenting the direct-to-Meta path if it is ever wanted.
+  `ADAPTERS[Channel.WHATSAPP]` resolves to `WhatsAppPortalAdapter`, not it.
+- **Do not read the portal's secrets.** Its Vercel vars for
+  `WHATSAPP_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`/`WHATSAPP_WABA_ID` are marked
+  Sensitive — that is intentional access control, not an obstacle to route
+  around.
+- The client's own Cloud API credentials are in `.env` (added 2026-08-16) but
+  **unused by the live path**, since outbound goes through the portal. They
+  remain only for the stub's direct-to-Meta option.
+
+**Verified before going live** (portal mocked): forwarded message → correct
+`whatsapp:<phone>` conversation → RAG hit → Hinglish reply matching a Hinglish
+question → exactly the two portal calls in order. Degrades correctly (failed
+conversation lookup still sends; failed send returns False), and a non-object
+JSON body is rejected rather than crashing.
+
 
 ## Redis (optional operational layer)
 
@@ -261,13 +232,11 @@ still `false` in production pending a worker service — see below.
   only Supabase/OpenAI/Groq/Qdrant/Redis, so there was no reason to widen
   where those particular credentials live.
 
-  Enabling `REDIS_JOBS_ENABLED=true` on the Render web service before this
-  workflow exists and has run successfully would enqueue jobs nothing
-  consumes; intelligence scoring/summaries would silently stop updating
-  instead of falling back to inline (the inline fallback only triggers when
-  enqueueing itself fails, not when nothing drains the queue). Confirm the
-  workflow has run cleanly at least once (Actions tab → run logs show
-  `worker_run_once_finished`) before flipping that flag on the web service.
+  Both are live now (`REDIS_JOBS_ENABLED=true`, workflow running on
+  schedule). Keep them paired: the flag on with no drain running means jobs
+  accumulate and intelligence scoring/summaries silently stop updating rather
+  than falling back to inline. `worker_run_once_finished` in the Actions run
+  log is the signal that a drain completed.
 - **Phase F** (done, not yet enabled in production — see production status
   note): `app/cache.py` — generic cache-aside (`get_or_set`/`invalidate`/
   `invalidate_namespace`) with single-flight stampede protection (a short
@@ -436,21 +405,19 @@ deployment, not just locally:
   they leave no history trace by design — don't mistake a lower-than-sent
   message count for a bug when auditing conversation history after a burst.
 
-**`REDIS_JOBS_ENABLED` is still `false`** on the web service. The code
-(Phase E, `app/jobs.py`/`app/worker.py`) is deployed and live-tested against
-Redis Cloud directly (see the Phase E entry above). Render Background
-Workers (a persistent process) aren't on the free tier, so the activation
-path here is `app/worker.py`'s drain-and-exit mode
-(`uv run python -m app.worker --once`) on a Render **Cron Job** (free tier)
-instead — that cron job hasn't been created yet. Don't flip
-`REDIS_JOBS_ENABLED=true` on the web service alone before it exists and has
-run successfully at least once; jobs would enqueue with nothing consuming
-them, and intelligence scoring/summaries would silently stop updating
-instead of falling back to inline (the inline fallback only triggers when
-enqueueing itself fails, not when nothing drains the queue).
+**`REDIS_JOBS_ENABLED=true`** on the web service, drained by the GitHub
+Actions workflow (see the Phase E entry above for why Actions rather than a
+Render service). Verified: scheduled runs succeed roughly every few minutes
+and a real queued job goes enqueue → drain → acked.
 
-**`REDIS_CACHE_ENABLED` is `false`** on the web service (Phase F code is
-deployed but dormant in production) and deliberately left `false` in
+The pairing matters — the flag and a running drain must go together. With the
+flag on and nothing consuming the stream, jobs pile up and intelligence
+scoring/summaries silently stop updating rather than falling back to inline
+(the inline fallback fires only when *enqueueing* fails, not when nothing
+drains). If you ever disable the workflow, turn the flag off too.
+
+**`REDIS_CACHE_ENABLED=true`** on the web service (enabled 2026-08-26; the
+WhatsApp reply path also depends on it for the conversation-id cache) and deliberately left `false` in
 `.env.render` for you to enable explicitly — unlike Phases B–D, caching has
 enough staleness-risk surface (and this phase's own live-testing already
 caught one real bug — see the Phase F entry above) that it's worth a
