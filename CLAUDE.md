@@ -353,6 +353,21 @@ data are merged in with two follow-up queries scoped to just the returned
 conversation ids, same shape as the rest of `app/store.py`. Verified against
 the live production Supabase — returns the one real conversation correctly.
 
+`GET /api/whatsapp/conversations` and
+`GET /api/whatsapp/conversations/{id}` are read-only proxies over the
+whatsapp-portal's own API (`app/whatsapp_portal.py`), added 2026-08-26 so the
+dashboard's WhatsApp tab can show real threads without holding the portal's
+database credentials or duplicating its query logic. They live under
+`/whatsapp/` because `/api/conversations/{conversation_id}` would otherwise
+swallow them. Both degrade to an empty result with `available: false` rather
+than raising, so a portal outage leaves that tab honestly empty instead of
+breaking the page. The per-thread endpoint they call
+(`/api/conversations/[id]/messages` on the portal) was added in the same pass,
+because the portal's own inbox reads Supabase directly with the operator's
+session and `/api/logs` is auth-gated — neither is reachable
+server-to-server. No send path: operator sending needs permissions and an
+audit trail first.
+
 `current_leads` is a view over append-only `lead_scores` — every score
 (AI-generated or manually overridden from the dashboard) is a new row, never
 an update. This is deliberate: ranking history stays auditable. A manual
