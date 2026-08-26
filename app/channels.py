@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from app import commands
+from app import cache, commands
 from app.config import settings
 from app.enums import Channel
 from app.logging_config import get_logger
@@ -471,24 +471,45 @@ class WhatsAppPortalAdapter(ChannelAdapter):
     async def _resolve_conversation(self, client: httpx.AsyncClient, phone: str) -> str | None:
         """Get (or create) the portal's conversation id for this phone number.
 
+        Cached, because this call measured 1.7-4.1s in production — often the
+        single most expensive step in answering a customer, and almost always
+        redundant: by the time we reply, the portal's own webhook has already
+        created the conversation for the inbound message. Portal conversation
+        ids never rotate (one row per user+contact, `get-or-create` returns the
+        same uuid forever), so a long TTL is safe.
+
         Returns None rather than raising: a failure here costs an accurate
         inbox preview, which is not worth losing the customer's reply over.
         """
-        try:
-            response = await client.post(
-                f"{self.base_url}/api/conversations/get-or-create",
-                json={"phoneNumber": phone},
-            )
-            if response.status_code != 200:
-                log.warning(
-                    "whatsapp_portal_conversation_failed",
-                    extra={"phone_suffix": phone[-4:], "status": response.status_code},
+
+        async def _fetch() -> str | None:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/conversations/get-or-create",
+                    json={"phoneNumber": phone},
                 )
+                if response.status_code != 200:
+                    log.warning(
+                        "whatsapp_portal_conversation_failed",
+                        extra={"phone_suffix": phone[-4:], "status": response.status_code},
+                    )
+                    return None
+                return ((response.json() or {}).get("conversation") or {}).get("id")
+            except Exception:
+                log.exception("whatsapp_portal_conversation_error")
                 return None
-            return ((response.json() or {}).get("conversation") or {}).get("id")
-        except Exception:
-            log.exception("whatsapp_portal_conversation_error")
-            return None
+
+        # Never cache a None: a transient portal failure must not poison the
+        # id for the whole TTL and leave every later reply orphaned from the
+        # thread (send-message writes conversation_id straight onto the row).
+        conversation_id = await cache.get_or_set(
+            cache.wa_conversation_key(phone),
+            settings.cache_wa_conversation_ttl_seconds,
+            _fetch,
+        )
+        if conversation_id is None:
+            await cache.invalidate(cache.wa_conversation_key(phone))
+        return conversation_id
 
 
 # ---------------------------------------------------------------------------

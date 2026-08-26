@@ -144,6 +144,112 @@ async def ensure_collection() -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Greetings and acknowledgements, English + the Hinglish/Hindi forms customers
+# actually send. Matched only as a WHOLE message, never as a substring, so
+# "hi, price of GW42?" still retrieves.
+_SMALLTALK = {
+    "hi",
+    "hii",
+    "hiii",
+    "hey",
+    "heyy",
+    "hello",
+    "helo",
+    "hlo",
+    "yo",
+    "hi sir",
+    "hello sir",
+    "hey sir",
+    "hi bro",
+    "hello ji",
+    "hi ji",
+    "namaste",
+    "namaskar",
+    "salaam",
+    "salam",
+    "ok",
+    "okay",
+    "okk",
+    "k",
+    "kk",
+    "hmm",
+    "hm",
+    "hmmm",
+    "yes",
+    "yea",
+    "yeah",
+    "yep",
+    "no",
+    "nope",
+    "nah",
+    "haan",
+    "haa",
+    "ha",
+    "ji",
+    "ji sir",
+    "acha",
+    "accha",
+    "theek",
+    "thik",
+    "thik hai",
+    "theek hai",
+    "ok thanks",
+    "okay thanks",
+    "ok ji",
+    "thanks",
+    "thank you",
+    "thanku",
+    "thankyou",
+    "thx",
+    "ty",
+    "dhanyavad",
+    "welcome",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good night",
+    "bye",
+    "byee",
+    "goodbye",
+    "tata",
+    "it is working",
+    "its working",
+    "working",
+    "test",
+    "testing",
+    "who are you",
+    "kaun",
+    "kaun ho",
+    "?",
+    "??",
+    "...",
+}
+
+# Anything that looks like a product code (GW42, iM-62, FX-201, MQ-950, 32mm)
+# or carries a number is never smalltalk, however short.
+_PRODUCTISH_RE = re.compile(r"\d")
+
+
+def is_smalltalk(query: str) -> bool:
+    """True when retrieval is pointless — a greeting or bare acknowledgement.
+
+    Conservative by design: a false positive means the agent answers a real
+    product question with no catalogue context, which is far worse than
+    spending 2s on a needless lookup. So this matches the WHOLE normalised
+    message against a fixed list, and refuses anything containing a digit
+    (model numbers, sizes, quantities) or more than four words.
+    """
+    normalised = re.sub(r"[^\w\s?.]", "", query.strip().lower())
+    normalised = " ".join(normalised.split())
+    if not normalised:
+        return True
+    if _PRODUCTISH_RE.search(normalised):
+        return False
+    if len(normalised.split()) > 4:
+        return False
+    return normalised in _SMALLTALK or normalised.rstrip("?.") in _SMALLTALK
+
+
 async def search(
     query: str, *, limit: int | None = None, conversation_id: str | None = None
 ) -> list[RetrievedChunk]:
@@ -201,6 +307,17 @@ async def search(
         return [c.model_dump() for c in chunks]
 
     if not query.strip():
+        return []
+
+    if is_smalltalk(query):
+        # Retrieval on "hey" / "ok thanks" cost 1.3-3.1s in production and
+        # returned zero hits every time (embedding call + Qdrant round trip,
+        # both wasted). Skipping it is the single cheapest latency win on a
+        # channel where the customer is watching a typing gap.
+        log.info(
+            "rag_skipped_smalltalk",
+            extra={"conversation_id": conversation_id, "query": query[:40]},
+        )
         return []
 
     raw = await cache.get_or_set(cache.rag_key(query), settings.cache_rag_ttl_seconds, _fetch)

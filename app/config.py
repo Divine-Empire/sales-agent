@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     cache_machine_ttl_seconds: int = 2400
     cache_rag_ttl_seconds: int = 1200
     cache_dashboard_ttl_seconds: int = 45
+    # whatsapp-portal conversation ids never rotate, so this can be long —
+    # it exists to skip a 1.7-4.1s get-or-create call on every AI reply.
+    cache_wa_conversation_ttl_seconds: int = 86400
     cache_stampede_lock_ttl_seconds: float = 5.0
     cache_stampede_wait_seconds: float = 2.0
 

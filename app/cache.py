@@ -187,3 +187,13 @@ def rag_key(query: str) -> str:
 
 def dashboard_key(name: str) -> str:
     return redis_client.build_key("cache", "dashboard", name)
+
+
+def wa_conversation_key(phone: str) -> str:
+    """whatsapp-portal's conversation id for a phone number.
+
+    Safe to cache for a long time: the portal creates one conversation row per
+    (user, contact) and never rotates its id — `get-or-create` returns the same
+    uuid forever. Caching it removes a 1.7-4.1s round trip from every AI reply.
+    """
+    return redis_client.build_key("cache", "wa", "conv", phone)
