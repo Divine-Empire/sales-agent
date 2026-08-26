@@ -550,6 +550,32 @@ async def upsert_machine(
         return None
 
 
+async def update_machine_fields(machine_id: str, fields: dict[str, Any]) -> bool:
+    """Edit an existing machine's own fields (price, description, etc.) from
+    the dashboard, without touching machine_code/name/category or requiring a
+    re-upload — the counterpart to update_customer_fields."""
+    client = await get_client()
+    if client is None:
+        return False
+    payload = {k: v for k, v in fields.items() if v is not None}
+    if not payload:
+        return True
+    try:
+        result = await client.table("machines").update(payload).eq("id", machine_id).execute()
+        log.info("machine_fields_updated", extra={"machine_id": machine_id})
+        if result.data:
+            row = result.data[0]
+            await cache.invalidate(
+                cache.machine_key(row["machine_code"]),
+                cache.machines_list_key(None),
+                cache.machines_list_key(row.get("category")),
+            )
+        return True
+    except Exception:
+        log.exception("machine_update_failed", extra={"machine_id": machine_id})
+        return False
+
+
 async def save_machine_document(
     *,
     machine_id: str | None,
