@@ -35,39 +35,99 @@ def _base() -> str:
     return settings.whatsapp_portal_base_url.rstrip("/")
 
 
+# The portal's list endpoint is backed by Supabase, which caps any single
+# response at 1000 rows. The portal derives `hasMore` by over-fetching one row
+# (`limit + 1`), so asking for exactly 1000 makes that probe row get clamped
+# away and `hasMore` reads false even when thousands remain. Staying below the
+# ceiling keeps the probe intact, so paging never stalls.
+_PORTAL_PAGE_MAX = 500
+
+
 async def list_conversations(
     limit: int = 30, cursor: str | None = None, filter_: str | None = None
 ) -> dict[str, Any]:
     """Conversation list, newest activity first.
 
-    Mirrors the portal's own pagination contract (`hasMore`/`nextCursor`
-    keyed on `last_message_at`) rather than inventing a different one, so the
-    dashboard can page without this service holding any state.
+    `limit` may exceed the portal's 1000-row ceiling: this pages through with
+    the portal's own `nextCursor` (a `last_message_at` timestamp) and
+    concatenates, so the dashboard can render one growing list rather than
+    windowed pages that make earlier rows disappear.
+
+    `has_more`/`next_cursor` describe the position after the last row
+    returned, so a caller can continue from there.
     """
-    params: dict[str, Any] = {"limit": limit}
-    if cursor:
-        params["cursor"] = cursor
-    if filter_ and filter_ != "all":
-        params["filter"] = filter_
+    if filter_ == "all":
+        filter_ = None
+
+    collected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    next_cursor = cursor
+    has_more = False
 
     try:
         async with httpx.AsyncClient(timeout=settings.whatsapp_portal_timeout_seconds) as client:
-            response = await client.get(f"{_base()}/api/conversations/list", params=params)
-        if response.status_code != 200:
-            log.warning(
-                "portal_conversations_failed",
-                extra={"status": response.status_code, "body": response.text[:200]},
-            )
-            return {"conversations": [], "has_more": False, "next_cursor": None, "available": False}
-        payload = response.json() or {}
+            while len(collected) < limit:
+                page_size = min(_PORTAL_PAGE_MAX, limit - len(collected))
+                params: dict[str, Any] = {"limit": page_size}
+                if next_cursor:
+                    params["cursor"] = next_cursor
+                if filter_:
+                    params["filter"] = filter_
+
+                response = await client.get(f"{_base()}/api/conversations/list", params=params)
+                if response.status_code != 200:
+                    log.warning(
+                        "portal_conversations_failed",
+                        extra={"status": response.status_code, "body": response.text[:200]},
+                    )
+                    # Keep whatever earlier pages succeeded rather than
+                    # discarding a partly-built list.
+                    if collected:
+                        break
+                    return {
+                        "conversations": [],
+                        "has_more": False,
+                        "next_cursor": None,
+                        "available": False,
+                    }
+
+                payload = response.json() or {}
+                rows = payload.get("conversations") or []
+                if not rows:
+                    has_more = False
+                    break
+
+                for row in rows:
+                    # Conversations sharing a last_message_at can straddle a
+                    # cursor boundary and repeat; drop duplicates so the UI
+                    # never renders the same thread twice.
+                    row_id = row.get("id")
+                    if row_id and row_id in seen_ids:
+                        continue
+                    if row_id:
+                        seen_ids.add(row_id)
+                    collected.append(row)
+
+                has_more = bool(payload.get("hasMore"))
+                next_cursor = payload.get("nextCursor")
+                if not has_more or not next_cursor:
+                    break
+
         return {
-            "conversations": payload.get("conversations") or [],
-            "has_more": bool(payload.get("hasMore")),
-            "next_cursor": payload.get("nextCursor"),
+            "conversations": collected,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
             "available": True,
         }
     except Exception:
         log.exception("portal_conversations_error")
+        if collected:
+            return {
+                "conversations": collected,
+                "has_more": False,
+                "next_cursor": None,
+                "available": True,
+            }
         return {"conversations": [], "has_more": False, "next_cursor": None, "available": False}
 
 
