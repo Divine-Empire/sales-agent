@@ -63,6 +63,22 @@ class Settings(BaseSettings):
     whatsapp_api_version: str = "v21.0"
     whatsapp_timeout_seconds: float = 10.0
 
+    # WhatsApp via the existing portal (whatsapp-portal, its own Vercel app +
+    # Supabase). We do NOT call Meta directly for WhatsApp: the portal owns
+    # the outbound path, and calling its /api/send-message keeps it the single
+    # writer of whatsapp_portal_messages — so its inbox, delivery-status
+    # matching (which joins on the wa_message_id only the sender sees), and
+    # template stats all stay correct. See CLAUDE.md "WhatsApp status".
+    whatsapp_portal_base_url: str = "https://whatsapp-portal-divine.vercel.app"
+    whatsapp_portal_timeout_seconds: float = 20.0
+    # Shared secret the Apps Script sends on the inbound-forward call. Empty
+    # means the endpoint is open — set it in both places before going live.
+    whatsapp_inbound_secret: str = ""
+    # Master switch for the whole WhatsApp path. False = the inbound endpoint
+    # accepts and acknowledges but never runs the agent or sends anything, so
+    # this can ship dark and be flipped on deliberately.
+    whatsapp_agent_enabled: bool = False
+
     # Redis (optional operational layer — Addition.md).
     #
     # Redis is never the system of record. Every feature here must be safe to

@@ -67,10 +67,66 @@ reference only — not shipped, ask if you need it summarized).
   before implementing `WhatsAppAdapter`, registering any webhook, or sending
   anything through the Cloud API. Config plumbing (`app/config.py` settings,
   `.env.example` docs) is done; the adapter itself is untouched.
+- **Superseded 2026-08-26 — WhatsApp is now wired up, but NOT the way the
+  stub anticipated.** The user approved connecting to the existing systems
+  rather than going direct to Meta. What was built:
+  - `WhatsAppPortalAdapter` (`app/channels.py`) is the live adapter and what
+    `ADAPTERS[Channel.WHATSAPP]` resolves to. Outbound calls
+    `whatsapp-portal`'s own `POST /api/conversations/get-or-create` then
+    `POST /api/send-message` — **never Meta directly**. Reason: the portal's
+    Supabase only gains rows from the portal's own code, and it writes the
+    `wa_message_id` inline with the send because that is the only moment it
+    is known; Meta's later delivery/read webhooks match on exactly that
+    column. Sending from here would leave the portal's inbox showing customer
+    questions with no answers, and its status updates unmatched.
+  - `POST /webhooks/whatsapp-inbound` (`app/main.py`) receives messages
+    forwarded by `app_scripts/app.gs`. **Meta's webhook registration stays
+    with the Apps Script** — untouched, so the marketing pipeline's reply
+    tracking is unaffected and no coordinated cutover was needed.
+  - `_forwardToSalesAgent()` in `app_scripts/app.gs` is the forward, called
+    at the end of `_processMessages` after all Sheet bookkeeping. Config via
+    Script Properties (`SALES_AGENT_URL`, `SALES_AGENT_SECRET`); unset URL
+    disables it. Fire-and-forget inside try/catch — an agent outage cannot
+    break the live webhook. Text-only: button/list taps are campaign clicks
+    the Sheet flow owns, so the agent does not talk over its own campaign.
+  - The original `WhatsAppAdapter` stub is deliberately left in place,
+    unimplemented, documenting the direct-to-Meta path if it is ever wanted.
+  - **Phone format is the join key across all three systems.** Forward the
+    `91`-prefixed form (`app.gs`'s `_normalizePhone`, which now matches the
+    portal's `normalizePhoneNumber` exactly). `app.gs`'s `_cleanPhone` strips
+    the `91` for Sheet row matching — feeding its output to the portal would
+    create a duplicate contact and split the thread in the operator's inbox.
+  - Gated by `WHATSAPP_AGENT_ENABLED` (default **false**) plus
+    `WHATSAPP_INBOUND_SECRET`. Shipped dark: the endpoint acks 200 but runs
+    nothing until the flag is set on Render.
+  - Verified locally with the portal mocked: forwarded message → correct
+    `whatsapp:<phone>` conversation → RAG hit → Hinglish reply matching the
+    customer's Hinglish question → exactly the two portal calls in order.
+    Also verified it degrades correctly (failed conversation lookup still
+    sends; failed send returns False) and that a non-object JSON body is
+    rejected rather than crashing. **No message has been sent to a real
+    customer yet.**
 - Do not read WhatsApp portal secrets. If investigating, its Vercel env vars
   for `WHATSAPP_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`/`WHATSAPP_WABA_ID` are
   marked Sensitive (write-only via CLI) — that's intentional platform access
   control, not a puzzle to route around.
+- **`whatsapp-portal` now exists as a local sibling directory**
+  (`../whatsapp-portal`, repo `Divine-Empire/whatsapp-portal`) and was fully
+  code-audited 2026-08-26 — see its own `CLAUDE.md` for the complete
+  breakdown. Short version: it is a real, mature, feature-complete WhatsApp
+  Business inbox (chat UI, template send/track with delivery status, media,
+  the Google-Sheets bulk-send bridge that `app_script/app.gs` here talks to
+  via `/api/sync-sheet`, a keyword-based interest classifier) — not a stub.
+  It has its own Supabase project and its own webhook registration; nothing
+  about that changes the constraint above. Its deployment was independently
+  confirmed live via Vercel CLI the same day (Vercel project
+  `whatsapp-portal`, team `mis-thedivineemps-projects` — same team as
+  `sales-agent-dashboard`; most recent deploy 2 days old at the time). As of
+  2026-08-26 the plan is to
+  surface it inside `sales-agent-dashboard`'s WhatsApp tab, but the
+  integration shape is not yet decided — see that repo's `CLAUDE.md` for
+  the open question. This backend (`sales-agent`) is not currently expected
+  to be part of that integration; if that changes, update this section.
 
 ## Redis (optional operational layer)
 

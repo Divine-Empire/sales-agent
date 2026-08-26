@@ -40,7 +40,7 @@ from app import (
     store,
 )
 from app.agent import handle_message
-from app.channels import TelegramAdapter, build_notification
+from app.channels import TelegramAdapter, WhatsAppPortalAdapter, build_notification
 from app.config import settings
 from app.enums import Channel, DocumentType, HandoverStatus, LeadCategory
 from app.logging_config import get_logger, setup_logging
@@ -50,6 +50,9 @@ setup_logging()
 log = get_logger(__name__)
 
 telegram = TelegramAdapter()
+# WhatsApp goes out through the existing portal, never Meta directly — see
+# WhatsAppPortalAdapter's docstring. Ops alerts still go to Telegram.
+whatsapp = WhatsAppPortalAdapter()
 
 # Strong refs to detached tasks; without this the GC can cancel them mid-flight.
 _background: set[asyncio.Task[None]] = set()
@@ -223,6 +226,122 @@ async def telegram_webhook(
     task.add_done_callback(_background.discard)
 
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp inbound (forwarded by app_scripts/app.gs, not Meta directly)
+# ---------------------------------------------------------------------------
+
+
+async def _process_whatsapp(payload: dict[str, Any]) -> None:
+    """Handle one forwarded WhatsApp message. Never raises — runs detached.
+
+    Mirrors `_process` but through the portal adapter. Deliberate differences:
+    no typing indicator (the portal has no such API) and no quick-reply
+    keyboard (WhatsApp only offers those on pre-approved templates, not
+    free-form replies).
+    """
+    incoming = whatsapp.parse(payload)
+    if incoming is None:
+        return
+
+    conversation_id = incoming.conversation_id
+    try:
+        if await store.is_opted_out(incoming.channel, incoming.user_id):
+            log.info("suppressed_opted_out", extra={"conversation_id": conversation_id})
+            return
+
+        limit_result = await rate_limit.check_customer(str(incoming.channel), incoming.user_id)
+        if not limit_result.allowed:
+            log.info(
+                "customer_rate_limited",
+                extra={
+                    "conversation_id": conversation_id,
+                    "limited_by": limit_result.limited_by,
+                },
+            )
+            # Deliberately silent: a marketing blast can trip this for many
+            # numbers at once, and a flood of "you're too fast" texts on a
+            # billable channel is worse than saying nothing. The customer's
+            # message is still visible to an operator in the portal inbox.
+            return
+
+        reply = await handle_message(incoming)
+        await whatsapp.send(
+            OutgoingMessage(channel=Channel.WHATSAPP, user_id=incoming.user_id, text=reply.text)
+        )
+        for note in reply.notifications:
+            text = build_notification(note, conversation_id)
+            if text:
+                await telegram.notify_ops(text)
+
+        if reply.model != "command":
+            queued = await jobs.enqueue(jobs.JOB_TYPE_INTELLIGENCE, conversation_id)
+            if not queued:
+                await intelligence.analyse(conversation_id)
+    except Exception:
+        log.exception("whatsapp_processing_failed", extra={"conversation_id": conversation_id})
+        await whatsapp.send(
+            OutgoingMessage(
+                channel=Channel.WHATSAPP,
+                user_id=incoming.user_id,
+                text=prompts.ERROR_MESSAGE,
+            )
+        )
+
+
+@app.post("/webhooks/whatsapp-inbound")
+async def whatsapp_inbound(
+    request: Request,
+    x_inbound_secret: str | None = Header(default=None),
+) -> JSONResponse:
+    """Inbound WhatsApp messages, forwarded by `app_scripts/app.gs`.
+
+    This is NOT Meta's webhook. The Apps Script holds that registration for
+    this phone number (Meta allows exactly one per number, and re-pointing it
+    would break the live marketing pipeline's reply tracking), so it forwards
+    a small JSON body here after doing its own Sheet bookkeeping.
+
+    Always acks 200, even when disabled or on bad input: the caller is a
+    fire-and-forget `UrlFetchApp.fetch` inside a live webhook handler, and a
+    non-200 there would only add noise to the Apps Script's logs without
+    changing anything on our side.
+    """
+    if settings.whatsapp_inbound_secret:
+        if x_inbound_secret != settings.whatsapp_inbound_secret:
+            log.warning("whatsapp_inbound_bad_secret")
+            raise HTTPException(status_code=403, detail="forbidden")
+
+    if not settings.whatsapp_agent_enabled:
+        log.info("whatsapp_inbound_disabled")
+        return JSONResponse({"ok": True, "handled": False, "reason": "disabled"})
+
+    try:
+        payload = await request.json()
+    except Exception:
+        log.warning("whatsapp_inbound_bad_json")
+        return JSONResponse({"ok": True, "handled": False, "reason": "bad_json"})
+
+    # Valid JSON is not necessarily an object — a bare string or list parses
+    # fine and would then blow up on .get(). Apps Script builds this body, so
+    # a wrong shape means someone changed one side without the other.
+    if not isinstance(payload, dict):
+        log.warning("whatsapp_inbound_bad_shape", extra={"type": type(payload).__name__})
+        return JSONResponse({"ok": True, "handled": False, "reason": "bad_shape"})
+
+    # Dedupe on Meta's wamid, reusing the Phase B machinery. The Apps Script
+    # has its own 5-minute duplicate guard, but Meta also retries the webhook
+    # itself, and a duplicate here means a duplicate reply on a billable
+    # channel plus a second lead-scoring pass.
+    message_id = payload.get("message_id")
+    if message_id and not await dedupe.claim_update(f"whatsapp:{message_id}"):
+        return JSONResponse({"ok": True, "handled": False, "reason": "duplicate"})
+
+    task = asyncio.create_task(_process_whatsapp(payload))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+    return JSONResponse({"ok": True, "handled": True})
 
 
 @app.post("/admin/telegram/set-webhook")
@@ -539,6 +658,25 @@ async def delete_machine(machine_id: str) -> dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=500, detail="could not delete machine")
     return {"id": machine_id, "deleted": True}
+
+
+class MachineUpdate(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    description: str | None = None
+    price_range: str | None = None
+    lead_time: str | None = None
+    is_active: bool | None = None
+
+
+@api.patch("/machines/{machine_id}")
+async def update_machine(machine_id: str, update: MachineUpdate) -> dict[str, Any]:
+    """Let a rep correct a machine's own fields (price, description, etc.)
+    without re-uploading its source document."""
+    ok = await store.update_machine_fields(machine_id, update.model_dump(exclude_none=True))
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not update machine")
+    return {"id": machine_id, **update.model_dump(exclude_none=True)}
 
 
 app.include_router(api)

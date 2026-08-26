@@ -28,6 +28,9 @@ log = get_logger(__name__)
 # Telegram's hard limit is 4096; leave headroom for the split suffix.
 TELEGRAM_MAX_CHARS = 4000
 
+# Meta's text body limit is 4096; same headroom as Telegram's for the same reason.
+WHATSAPP_MAX_CHARS = 4000
+
 
 class ChannelAdapter(ABC):
     """What every channel must provide. Nothing platform-specific escapes this."""
@@ -339,6 +342,155 @@ class WhatsAppAdapter(ChannelAdapter):
         )
 
 
+class WhatsAppPortalAdapter(ChannelAdapter):
+    """WhatsApp via the existing `whatsapp-portal` app — the adapter actually in use.
+
+    This deliberately does NOT call Meta. `WhatsAppAdapter` above documents the
+    direct-to-Meta path and stays a stub; this class is the live one, and the
+    difference matters:
+
+    The portal (`whatsapp-portal`, its own Vercel app + Supabase) already owns
+    Divine Empire's WhatsApp number end to end — bulk marketing sends, the
+    operator inbox, template delivery stats. Its Supabase only ever gains rows
+    from its own code paths: there is no poller, no realtime listener, no
+    reconciliation job. In particular, `whatsapp_portal_messages` rows are
+    written inline by the same request that performs the send, because that is
+    the only moment `wa_message_id` is known — and Meta's later delivery/read
+    status webhooks are matched by exactly that column.
+
+    So if this service sent to Meta itself, the portal would never learn the
+    message existed: its inbox would show the customer's question with no
+    answer beneath it, and every status update for our replies would fail to
+    match a row. Routing through the portal's own `/api/send-message` keeps it
+    the single writer, and costs us only one network hop we can afford next to
+    an LLM call.
+
+    INBOUND is not Meta's webhook either. The Google Apps Script
+    (`app_scripts/app.gs`, gitignored reference copy) is Meta's registered
+    webhook for this number and must stay that way — Meta permits exactly one
+    webhook URL per number, so re-pointing it here would break the live
+    marketing pipeline's reply tracking. Instead that script forwards each
+    inbound message to `POST /webhooks/whatsapp-inbound` on this service, and
+    `parse()` below reads that forwarded shape (not Meta's raw envelope).
+
+    PHONE NUMBERS: pass Meta's `from` value through untouched — e.g.
+    `919876543210`, country code included. The portal's own
+    `normalizePhoneNumber` stores contacts in exactly that form, so an
+    unmodified value matches existing rows. Do NOT reuse `app.gs`'s
+    `_cleanPhone`, which strips the leading `91` for Sheet matching; feeding
+    its output to the portal would create a second, duplicate contact and
+    split the conversation in the operator's inbox.
+    """
+
+    channel = Channel.WHATSAPP
+
+    def __init__(self, base_url: str | None = None):
+        self.base_url = (base_url or settings.whatsapp_portal_base_url).rstrip("/")
+
+    def parse(self, payload: dict[str, Any]) -> IncomingMessage | None:
+        """Read the forwarded payload posted by `app.gs`.
+
+        Expected shape (the Apps Script builds this; keep both sides in step):
+            {"from": "919876543210", "text": "...", "name": "Rajesh",
+             "message_id": "wamid.XXX", "type": "text"}
+
+        Non-text messages are skipped exactly as Telegram's non-text updates
+        are — the customer is not left hanging, because the portal's inbox
+        still shows their message for an operator to pick up manually.
+        """
+        phone = str(payload.get("from") or "").strip()
+        if not phone:
+            log.warning("whatsapp_forward_ignored", extra={"reason": "no_from"})
+            return None
+
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            log.info(
+                "whatsapp_forward_ignored",
+                extra={"reason": "non_text", "type": payload.get("type")},
+            )
+            return None
+
+        name = payload.get("name")
+        sender_name = str(name).strip() if name and str(name).strip() != phone else None
+
+        return IncomingMessage(
+            channel=self.channel,
+            user_id=phone,
+            text=text.strip(),
+            sender_name=sender_name,
+            sender_phone=phone,
+            raw={"message_id": payload.get("message_id"), "source": "app_scripts_forward"},
+        )
+
+    async def send(self, message: OutgoingMessage) -> bool:
+        """Deliver via the portal: resolve the conversation, then send.
+
+        Two calls, both to the portal:
+          1. POST /api/conversations/get-or-create  -> conversation.id
+          2. POST /api/send-message                 -> Meta send + Supabase rows
+
+        Step 1 is required because `/api/send-message` only refreshes
+        `whatsapp_portal_conversations.last_message` when it is given a
+        `conversationId`; without it the thread's preview would go stale in the
+        operator's inbox even though the message itself went out fine.
+        """
+        chunks = split_message(message.text, limit=WHATSAPP_MAX_CHARS)
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.whatsapp_portal_timeout_seconds
+            ) as client:
+                conversation_id = await self._resolve_conversation(client, message.user_id)
+                for chunk in chunks:
+                    body: dict[str, Any] = {"to": message.user_id, "message": chunk}
+                    if conversation_id:
+                        body["conversationId"] = conversation_id
+                    response = await client.post(f"{self.base_url}/api/send-message", json=body)
+                    if response.status_code != 200:
+                        log.error(
+                            "whatsapp_portal_send_failed",
+                            extra={
+                                "conversation_id": message.conversation_id,
+                                "status": response.status_code,
+                                "body": response.text[:200],
+                            },
+                        )
+                        return False
+            log.info(
+                "whatsapp_portal_sent",
+                extra={"conversation_id": message.conversation_id, "parts": len(chunks)},
+            )
+            return True
+        except Exception:
+            log.exception(
+                "whatsapp_portal_send_error",
+                extra={"conversation_id": message.conversation_id},
+            )
+            return False
+
+    async def _resolve_conversation(self, client: httpx.AsyncClient, phone: str) -> str | None:
+        """Get (or create) the portal's conversation id for this phone number.
+
+        Returns None rather than raising: a failure here costs an accurate
+        inbox preview, which is not worth losing the customer's reply over.
+        """
+        try:
+            response = await client.post(
+                f"{self.base_url}/api/conversations/get-or-create",
+                json={"phoneNumber": phone},
+            )
+            if response.status_code != 200:
+                log.warning(
+                    "whatsapp_portal_conversation_failed",
+                    extra={"phone_suffix": phone[-4:], "status": response.status_code},
+                )
+                return None
+            return ((response.json() or {}).get("conversation") or {}).get("id")
+        except Exception:
+            log.exception("whatsapp_portal_conversation_error")
+            return None
+
+
 # ---------------------------------------------------------------------------
 # Ops notifications
 # ---------------------------------------------------------------------------
@@ -391,9 +543,11 @@ def build_notification(note: dict[str, Any], conversation_id: str) -> str | None
 
 
 # Registry so main.py can route by channel without importing concrete classes.
+# WHATSAPP maps to the portal-backed adapter, not the direct-to-Meta stub —
+# see WhatsAppPortalAdapter's docstring for why the portal owns that path.
 ADAPTERS: dict[Channel, ChannelAdapter] = {
     Channel.TELEGRAM: TelegramAdapter(),
-    Channel.WHATSAPP: WhatsAppAdapter(),
+    Channel.WHATSAPP: WhatsAppPortalAdapter(),
 }
 
 
