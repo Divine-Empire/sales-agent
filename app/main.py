@@ -38,6 +38,7 @@ from app import (
     rate_limit,
     redis_client,
     store,
+    whatsapp_portal,
 )
 from app.agent import handle_message
 from app.channels import TelegramAdapter, WhatsAppPortalAdapter, build_notification
@@ -489,6 +490,62 @@ async def jobs_dead_letter_count() -> dict[str, Any]:
     a non-zero count means the intelligence worker is failing repeatedly on
     something and needs a look, not that a customer went unanswered."""
     return {"dead_letter_count": await jobs.dead_letter_count()}
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp — read-only proxy over the portal's own API
+#
+# The portal owns this data; these routes exist so the CRM dashboard reaches it
+# through the one backend and one API key it already uses, instead of holding a
+# second database credential. Read-only: operator sending is not built until
+# permissions and auditing are designed. Under /whatsapp/ rather than
+# /conversations/ because /conversations/{conversation_id} would swallow it.
+# ---------------------------------------------------------------------------
+
+
+@api.get("/whatsapp/conversations")
+async def whatsapp_conversations(
+    limit: int = 30, cursor: str | None = None, filter: str = "all", q: str | None = None
+) -> dict[str, Any]:
+    """WhatsApp inbox list from the portal, newest activity first.
+
+    `q` switches to the portal's server-side search. `available: false` means
+    the portal could not be reached — the dashboard shows that differently
+    from a genuinely empty inbox.
+    """
+    if q:
+        result = await whatsapp_portal.search_conversations(q, limit=limit)
+        return {
+            "count": len(result["conversations"]),
+            "conversations": result["conversations"],
+            "has_more": False,
+            "next_cursor": None,
+            "available": result["available"],
+            "query": q,
+        }
+
+    result = await whatsapp_portal.list_conversations(limit=limit, cursor=cursor, filter_=filter)
+    return {
+        "count": len(result["conversations"]),
+        "conversations": result["conversations"],
+        "has_more": result["has_more"],
+        "next_cursor": result["next_cursor"],
+        "available": result["available"],
+    }
+
+
+@api.get("/whatsapp/conversations/{conversation_id}")
+async def whatsapp_conversation(conversation_id: str, limit: int = 100) -> dict[str, Any]:
+    """One WhatsApp thread, oldest message first, plus the contact header."""
+    result = await whatsapp_portal.get_messages(conversation_id, limit=limit)
+    if result is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {
+        "conversation": result["conversation"],
+        "count": len(result["messages"]),
+        "messages": result["messages"],
+        "available": result["available"],
+    }
 
 
 @api.patch("/handovers/{handover_id}")
