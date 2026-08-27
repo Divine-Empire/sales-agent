@@ -123,7 +123,13 @@ def build_messages(
                 "content": (
                     f"{product_context}\n\n"
                     "Use only the facts above for specifications and prices. "
-                    "If the answer is not there, say you will check with the team."
+                    "If the answer is not there, say you will check with the team.\n\n"
+                    "The catalog data above is formatted as tables and lists because that is how "
+                    "it is stored — that is NOT how you reply. Pick only the one or two items "
+                    "actually relevant to what the customer just asked, and say them in a plain "
+                    "sentence, the way you'd say it out loud. Do not carry the table/bullet "
+                    "structure, the category headings, or every row into your reply — reproducing "
+                    "the source formatting is the single most common mistake to avoid here."
                 ),
             }
         )
