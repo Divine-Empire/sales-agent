@@ -456,10 +456,18 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
                 break
 
             # Echo the assistant's tool-call turn back before the results.
+            # content is deliberately dropped, not echoed as response.content: GPT-4o
+            # sometimes narrates the call in prose alongside it (e.g. "I'll notify the
+            # team — request_human_handoff"), and that narration, once in history, has
+            # leaked into a LATER reply almost verbatim (a real customer saw the literal
+            # tool name "request_human_handoff" appended to an otherwise normal
+            # message). The customer-facing reply always comes from the next
+            # completion after tool results are fed back, never from this field, so
+            # there is nothing lost by not persisting it.
             messages.append(
                 {
                     "role": "assistant",
-                    "content": response.content,
+                    "content": None,
                     "tool_calls": [
                         {
                             "id": tc.id,

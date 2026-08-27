@@ -479,6 +479,30 @@ overriding a lead's category is a correction, not a permanent lock.
   and still needed as a safety net for whatever formatting slips through
   despite the prompt — don't remove it thinking the prompt fix makes it
   redundant.
+- Found by locally simulating a longer conversation against the real
+  pipeline (rag.search -> prompts.build_messages -> llm.complete, no
+  Supabase writes) after the qualifying/conciseness fixes above: a bulk
+  order message caused the model to call `request_human_handoff`, and the
+  literal text "request_human_handoff" appeared appended to the customer-
+  facing reply. Root cause was in `_handle_message_locked`'s tool loop
+  (`app/agent.py`): the assistant's tool-call turn was echoed back into
+  message history with `content: response.content` verbatim — but GPT-4o
+  sometimes narrates a tool call in that same content field (e.g. "I'll
+  notify the team — request_human_handoff") even though the customer-facing
+  reply is supposed to come only from the *next* completion, after tool
+  results are fed back. That narration, once persisted in history, was
+  visible to the model on a later turn and got echoed into an actual reply.
+  Fixed by setting `content: None` on the echoed tool-call message instead
+  of `response.content` — nothing is lost (the real reply never comes from
+  this field), and the narration can no longer enter history at all.
+  The leak itself was observed once, in a real user's transcript, before
+  any local reproduction was attempted — the fix was made and then verified
+  by running the same bulk-order scenario 4 times in a monkeypatched local
+  harness (no Supabase writes) with zero recurrences of the literal tool
+  name; the leak was never independently reproduced pre-fix, since GPT-4o's
+  content-alongside-tool-calls narration is non-deterministic. If you touch
+  this tool loop again, do not reintroduce echoing `response.content` on a
+  tool-call turn.
 
 ## Conventions
 
