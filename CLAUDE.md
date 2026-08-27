@@ -104,14 +104,21 @@ customer → Meta → whatsapp-portal /api/webhook/{userId}   (owns the webhook)
   customer to ask for the company intro explicitly. `app/agent.py` detects a
   genuine first message instead — `store.has_prior_messages(conversation_id)`
   checked before this turn's own message is saved — and prepends
-  `commands.start_message()` to the model's actual reply, so the customer
-  gets one message (intro + answer to whatever they asked), not two separate
-  sends. `start_message()` is shared with Telegram's `/start` handler and
-  includes a `Brochure:` line only when `BROCHURE_URL` is set (must be a
-  direct-download URL — a Drive share link serves an HTML preview page, not
-  the PDF bytes). No native document/file attachment on either channel yet —
-  both `TelegramAdapter.send` and `WhatsAppPortalAdapter.send` are text-only
-  today; the brochure is a link, not an attachment.
+  `commands.START_MESSAGE` to the model's actual reply, so the customer gets
+  one message (intro + answer to whatever they asked), not two separate
+  sends. Same constant Telegram's `/start` returns. Its `Brochure:` line is a
+  hardcoded Google Drive **direct-download** URL
+  (`drive.google.com/uc?export=download&id=...`), not the share-page link —
+  the share page renders an HTML viewer, not the raw PDF, and reads as
+  broken when tapped from inside a chat app. Deliberately hardcoded rather
+  than an env setting: the link isn't sensitive and isn't expected to change
+  often, so a runtime setting wasn't worth the extra indirection. No native
+  document/file attachment on either channel yet — both
+  `TelegramAdapter.send` and `WhatsAppPortalAdapter.send` are text-only
+  today; the brochure is a link, not an attachment. If that Drive link ever
+  breaks (Drive's virus-scan interstitial can trigger on larger files, and
+  this URL form isn't an officially documented stable API), swap it for
+  proper hosting rather than another Drive workaround.
 
 **Things that will bite you:**
 

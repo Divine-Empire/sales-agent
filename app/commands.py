@@ -27,45 +27,31 @@ CATEGORIES = [
 ]
 
 
-def start_message() -> str:
-    """First-contact company intro (client-provided template, emoji-free).
+# First-contact company intro (client-provided template, emoji-free). Sent on
+# Telegram's /start and, per app/agent.py, automatically on a customer's
+# genuine first message on WhatsApp (which has no slash-command concept in
+# this flow). The brochure link is a Google Drive direct-download URL (built
+# from the file's share-page id) rather than the share-page link itself —
+# Drive's share page renders an HTML viewer, not the raw PDF, which reads as
+# broken when tapped from inside a chat app.
+START_MESSAGE = """Greetings from Divine Empire India!
 
-    Sent on Telegram's /start and, per app/agent.py, automatically on a
-    customer's genuine first message on WhatsApp (which has no slash-command
-    concept in this flow). A function rather than a plain module-level
-    string because the brochure line depends on a runtime setting
-    (app/config.py's brochure_url) that can be empty or change without a
-    redeploy of this constant.
-    """
-    from app.config import settings
+Hope you are doing well.
 
-    lines = [
-        "Greetings from Divine Empire India!",
-        "",
-        "Hope you are doing well.",
-        "",
-        "About Divine Empire",
-        "",
-        "We are a trusted name in small construction equipment and "
-        "construction chemicals, offering 2,947+ products under one roof — "
-        "Total Station, Bar Bending, Cutting, Needle Vibrators, Compactors, "
-        "Admixtures, Lab & Safety Items, Anchor Fastener, and much more.",
-        "",
-        "In the last 10 years, we have helped 3,867+ customers complete "
-        "their projects successfully, worth ₹1,00,000+ Crores.",
-        "",
-        "Our strength is our strong after-sales support. We operate an "
-        "authorised Sokkia service centre with an advanced Japanese "
-        "Collimator & EDM setup, along with a NABL-accredited lab.",
-        "",
-        "We look forward to serving you.",
-        "",
-        "Watch: https://youtu.be/mvTn1gnJvdY?si=iHd5cKiW90539jk2",
-        "Visit: https://thedivineempire.com/",
-    ]
-    if settings.brochure_url:
-        lines.append(f"Brochure: {settings.brochure_url}")
-    return "\n".join(lines)
+About Divine Empire
+
+We are a trusted name in small construction equipment and construction chemicals, offering 2,947+ products under one roof — Total Station, Bar Bending, Cutting, Needle Vibrators, Compactors, Admixtures, Lab & Safety Items, Anchor Fastener, and much more.
+
+In the last 10 years, we have helped 3,867+ customers complete their projects successfully, worth ₹1,00,000+ Crores.
+
+Our strength is our strong after-sales support. We operate an authorised Sokkia service centre with an advanced Japanese Collimator & EDM setup, along with a NABL-accredited lab.
+
+We look forward to serving you.
+
+Watch: https://youtu.be/mvTn1gnJvdY?si=iHd5cKiW90539jk2
+Visit: https://thedivineempire.com/
+Brochure: https://drive.google.com/uc?export=download&id=1eN7pChBQX6YaEojxXAm6PQ6B_U6tJRnG
+"""
 
 
 HELP_MESSAGE = f"""Here's how I can help 👇
@@ -153,6 +139,7 @@ PASS_THROUGH_COMMANDS = {"/stop"}
 STATEFUL_COMMANDS = {"/clear"}
 
 COMMAND_RESPONSES = {
+    "/start": START_MESSAGE,
     "/help": HELP_MESSAGE,
     "/products": PRODUCTS_MESSAGE,
     "/contact": CONTACT_MESSAGE,
@@ -171,10 +158,6 @@ def handle_command(text: str) -> str | None:
     """Return a canned reply for a slash command, or None to let the agent run.
 
     Telegram sends "/start@botname" in groups, so the mention is stripped.
-    /start is built by start_message() rather than looked up in
-    COMMAND_RESPONSES because its brochure line depends on a runtime setting
-    (app/config.py's brochure_url) — every other command here is a fixed
-    string decided at import time.
     """
     stripped = text.strip()
     if not stripped.startswith("/"):
@@ -182,8 +165,6 @@ def handle_command(text: str) -> str | None:
     command = stripped.split()[0].split("@")[0].lower()
     if command in PASS_THROUGH_COMMANDS or command in STATEFUL_COMMANDS:
         return None
-    if command == "/start":
-        return start_message()
     return COMMAND_RESPONSES.get(command)
 
 

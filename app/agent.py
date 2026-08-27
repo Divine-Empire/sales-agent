@@ -496,7 +496,7 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
             # shouldn't cost them the greeting too. Note this path does not
             # persist an assistant message, matching this function's existing
             # behavior on LLM failure (unchanged by this addition).
-            error_text = f"{commands.start_message()}\n\n{error_text}"
+            error_text = f"{commands.START_MESSAGE}\n\n{error_text}"
         return AgentReply(text=error_text, model="none")
 
     if not reply_text.strip():
@@ -515,7 +515,7 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
         # left waiting through two separate sends before their question is
         # addressed. split_message (app/channels.py) handles the case where
         # the combination runs past the platform's character limit.
-        reply_text = f"{commands.start_message()}\n\n{reply_text}"
+        reply_text = f"{commands.START_MESSAGE}\n\n{reply_text}"
         log.info("whatsapp_first_message_greeted", extra={"conversation_id": conversation_id})
 
     await store.save_message(conversation_id, MessageRole.ASSISTANT, reply_text)
