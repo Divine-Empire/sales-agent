@@ -307,6 +307,86 @@ async def ingest_document(
     return {"chunks": len(chunks), "embedded": embedded, "codes": codes}
 
 
+async def ingest_accessory(
+    *,
+    accessory_id: str,
+    name: str,
+    category: str | None,
+    description: str | None,
+) -> dict[str, Any]:
+    """Embed one accessory/part as a single Qdrant point so the agent can
+    recommend it during a conversation.
+
+    Reuses the same chunk/embed/upsert machinery as machine documents rather
+    than a parallel pipeline — accessory text is short (name + description),
+    so it rarely needs more than one chunk. The `record_type` payload field
+    is the only new thing: a discriminator so retrieval can eventually tell
+    machines and accessories apart, if that's ever needed.
+    """
+    from qdrant_client import models
+
+    text = f"{name}\n{description or ''}".strip()
+    if not text:
+        return {"chunks": 0, "embedded": 0, "error": "no text to index"}
+
+    if not await ensure_collection():
+        return {"chunks": 1, "embedded": 0, "error": "vector store unavailable"}
+
+    client = get_client()
+    if client is None:
+        return {"chunks": 1, "embedded": 0, "error": "vector store unavailable"}
+
+    chunk = f"## {name} (accessory/part)\n{text}"
+    vectors = await embed([chunk])
+    if not vectors:
+        log.error("accessory_ingest_embed_failed", extra={"accessory_id": accessory_id})
+        return {"chunks": 1, "embedded": 0, "error": "embedding failed"}
+
+    point = models.PointStruct(
+        # Deterministic per accessory id, so re-editing updates the same
+        # point in place instead of duplicating — mirrors ingest_document's
+        # deterministic id scheme for machine chunks.
+        id=abs(hash(f"accessory:{accessory_id}")) % (2**63),
+        vector=vectors[0],
+        payload={
+            "text": chunk,
+            "title": name,
+            "category": category,
+            "codes": [],
+            "machine_id": None,
+            "accessory_id": accessory_id,
+            "price_range": None,
+            "source": "manual",
+            "record_type": "accessory",
+        },
+    )
+    try:
+        await client.upsert(collection_name=settings.qdrant_collection, points=[point])
+    except Exception:
+        log.exception("accessory_ingest_upsert_failed", extra={"accessory_id": accessory_id})
+        return {"chunks": 1, "embedded": 0, "error": "upsert failed"}
+
+    log.info("accessory_ingested", extra={"accessory_id": accessory_id, "name": name})
+    return {"chunks": 1, "embedded": 1}
+
+
+async def delete_accessory_from_index(accessory_id: str) -> None:
+    """Remove an accessory's Qdrant point. Best-effort, matching the existing
+    precedent — delete_machine doesn't clean up Qdrant points either, so this
+    isn't a new gap, just consistent with what's already here."""
+    client = get_client()
+    if client is None:
+        return
+    point_id = abs(hash(f"accessory:{accessory_id}")) % (2**63)
+    try:
+        await client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=[point_id],
+        )
+    except Exception:
+        log.exception("accessory_index_delete_failed", extra={"accessory_id": accessory_id})
+
+
 async def add_machine_from_document(
     *,
     name: str,

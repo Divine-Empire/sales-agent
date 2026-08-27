@@ -736,4 +736,83 @@ async def update_machine(machine_id: str, update: MachineUpdate) -> dict[str, An
     return {"id": machine_id, **update.model_dump(exclude_none=True)}
 
 
+# ---------------------------------------------------------------------------
+# Accessories/parts — manually maintained, no machine linkage yet (deferred;
+# see app/models.py's Accessory docstring). RAG-ingested the same way
+# machines are, just without the document-upload step.
+# ---------------------------------------------------------------------------
+
+
+class AccessoryCreate(BaseModel):
+    name: str
+    category: str | None = None
+    description: str | None = None
+
+
+class AccessoryUpdate(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    description: str | None = None
+    is_active: bool | None = None
+
+
+@api.get("/accessories")
+async def accessories(category: str | None = None) -> dict[str, Any]:
+    rows = await store.list_accessories(category=category)
+    return {"count": len(rows), "accessories": rows}
+
+
+@api.post("/accessories")
+async def create_accessory(payload: AccessoryCreate) -> dict[str, Any]:
+    """Add an accessory/part by typing it in directly — no document upload,
+    since these are entered manually per the current workflow."""
+    accessory_id = await store.upsert_accessory(
+        name=payload.name,
+        category=payload.category,
+        description=payload.description,
+    )
+    if not accessory_id:
+        raise HTTPException(status_code=500, detail="could not create accessory")
+    result = await documents.ingest_accessory(
+        accessory_id=accessory_id,
+        name=payload.name,
+        category=payload.category,
+        description=payload.description,
+    )
+    return {"id": accessory_id, "name": payload.name, **result}
+
+
+@api.patch("/accessories/{accessory_id}")
+async def update_accessory(accessory_id: str, update: AccessoryUpdate) -> dict[str, Any]:
+    """Edit an accessory's fields and re-index it, so RAG never serves a
+    stale description after a correction."""
+    fields = update.model_dump(exclude_none=True)
+    ok = await store.update_accessory_fields(accessory_id, fields)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not update accessory")
+    if fields.get("is_active") is False:
+        # Deactivated — pull it out of RAG so it stops surfacing in chat.
+        await documents.delete_accessory_from_index(accessory_id)
+    elif any(key in fields for key in ("name", "category", "description")):
+        rows = await store.list_accessories()
+        row = next((r for r in rows if r.get("id") == accessory_id), None)
+        if row:
+            await documents.ingest_accessory(
+                accessory_id=accessory_id,
+                name=row.get("name", ""),
+                category=row.get("category"),
+                description=row.get("description"),
+            )
+    return {"id": accessory_id, **fields}
+
+
+@api.delete("/accessories/{accessory_id}")
+async def delete_accessory(accessory_id: str) -> dict[str, Any]:
+    ok = await store.delete_accessory(accessory_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not delete accessory")
+    await documents.delete_accessory_from_index(accessory_id)
+    return {"id": accessory_id, "deleted": True}
+
+
 app.include_router(api)

@@ -128,6 +128,20 @@ class Machine(BaseModel):
     is_active: bool = True
 
 
+class Accessory(BaseModel):
+    """A part/accessory catalog entry. Manually maintained, not sourced from
+    documents. No machine linkage yet — deliberately deferred until there is
+    real data to model the relationship against."""
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: str | None = None
+    name: str
+    category: str | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
 class LeadScore(BaseModel):
     """One scoring event (BRD §9). Append-only — never updated in place."""
 

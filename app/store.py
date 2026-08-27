@@ -668,6 +668,113 @@ async def list_machines(category: str | None = None) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# accessories — parts/accessories catalog, manually maintained (no machine
+# linkage yet — deferred, see app/models.py's Accessory docstring)
+# ---------------------------------------------------------------------------
+
+
+async def upsert_accessory(
+    *,
+    accessory_id: str | None = None,
+    name: str,
+    category: str | None = None,
+    description: str | None = None,
+) -> str | None:
+    """Insert a new accessory, or update an existing one when accessory_id is
+    given. The counterpart to upsert_machine, minus the machine_code
+    conflict key since accessories aren't keyed by a catalog code."""
+    client = await get_client()
+    if client is None:
+        return None
+    payload = {
+        "name": name,
+        "category": category,
+        "description": description,
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+    try:
+        if accessory_id:
+            result = (
+                await client.table("accessories").update(payload).eq("id", accessory_id).execute()
+            )
+        else:
+            result = await client.table("accessories").insert(payload).execute()
+        row_id = result.data[0]["id"] if result.data else accessory_id
+        log.info("accessory_upserted", extra={"id": row_id})
+        await cache.invalidate(
+            cache.accessories_list_key(None),
+            cache.accessories_list_key(category),
+        )
+        return row_id
+    except Exception:
+        log.exception("accessory_upsert_failed", extra={"id": accessory_id})
+        return None
+
+
+async def update_accessory_fields(accessory_id: str, fields: dict[str, Any]) -> bool:
+    """Edit an existing accessory's fields — the counterpart to
+    update_machine_fields."""
+    client = await get_client()
+    if client is None:
+        return False
+    payload = {k: v for k, v in fields.items() if v is not None}
+    if not payload:
+        return True
+    try:
+        result = await client.table("accessories").update(payload).eq("id", accessory_id).execute()
+        log.info("accessory_fields_updated", extra={"accessory_id": accessory_id})
+        if result.data:
+            row = result.data[0]
+            await cache.invalidate(
+                cache.accessories_list_key(None),
+                cache.accessories_list_key(row.get("category")),
+            )
+        return True
+    except Exception:
+        log.exception("accessory_update_failed", extra={"accessory_id": accessory_id})
+        return False
+
+
+async def delete_accessory(accessory_id: str) -> bool:
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        result = await client.table("accessories").delete().eq("id", accessory_id).execute()
+        log.info("accessory_deleted", extra={"accessory_id": accessory_id})
+        if result.data:
+            row = result.data[0]
+            await cache.invalidate(
+                cache.accessories_list_key(None),
+                cache.accessories_list_key(row.get("category")),
+            )
+        return True
+    except Exception:
+        log.exception("accessory_delete_failed", extra={"accessory_id": accessory_id})
+        return False
+
+
+async def list_accessories(category: str | None = None) -> list[dict[str, Any]]:
+    async def _fetch() -> list[dict[str, Any]]:
+        client = await get_client()
+        if client is None:
+            return []
+        try:
+            query = client.table("accessories").select("*").eq("is_active", True)
+            if category:
+                query = query.eq("category", category)
+            result = await query.execute()
+            return result.data or []
+        except Exception:
+            log.exception("accessory_list_failed")
+            return []
+
+    return await cache.get_or_set(
+        cache.accessories_list_key(category), settings.cache_machine_ttl_seconds, _fetch
+    )
+
+
+# ---------------------------------------------------------------------------
 # ai_logs — telemetry. Fire-and-forget: never awaited in a reply path.
 # ---------------------------------------------------------------------------
 

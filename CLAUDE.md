@@ -86,7 +86,15 @@ customer → Meta → whatsapp-portal /api/webhook/{userId}   (owns the webhook)
   exactly that column. Sending from here would leave the portal's inbox
   showing customer questions with no answers and its status updates
   unmatched. The conversation id is cached (24h) — it never rotates, and
-  resolving it cost 1.7–4.1s per reply.
+  resolving it cost 1.7–4.1s per reply. As of 2026-08-27, outbound text is
+  also run through `to_whatsapp_text()` (`app/channels.py`) before sending —
+  the WhatsApp counterpart to `to_telegram_html()`: same Markdown-shaped
+  model output (`### heading`, `- bullet`, `**bold**`), converted to
+  WhatsApp's own plain-text markup (`*bold*` single-asterisk, no native
+  heading/list elements) instead of HTML, since WhatsApp has no parse-mode
+  concept. Deliberately a separate function rather than a shared one with
+  Telegram's — the two platforms' bold syntax differs enough that branching
+  inside one function would be harder to follow than two short ones.
 - **Reads**: `app/whatsapp_portal.py` + `/api/whatsapp/conversations[/{id}]`
   back the dashboard's WhatsApp tab, so that project needs no portal
   credentials. See "What the dashboard can rely on" below.
@@ -305,14 +313,49 @@ document is skipped rather than run up a large per-page API bill silently;
 logged as `ocr_skipped_too_many_pages`). New deps: `pypdfium2`, `pillow`
 (both pure-wheel, safe on Render's buildpack).
 
+## Catalog: accessories/parts (added 2026-08-27)
+
+A second, deliberately simpler catalog table alongside `machines`:
+`accessories` (`migrations/004_accessories.sql`) — `name`, `category`,
+`description`, `is_active`, no other fields. **No machine linkage yet** —
+that's an explicit, deferred design decision, not an oversight. Accessories
+are entered manually (typed/pasted into the dashboard), never via document
+upload; there is no OCR/extraction path for them and none is planned until
+Google Sheet integration is revisited.
+
+CRUD lives in `app/store.py` (`upsert_accessory`/`update_accessory_fields`/
+`delete_accessory`/`list_accessories`, mirroring the `machines` functions)
+and `/api/accessories` routes in `app/main.py` (GET list, POST create, PATCH
+update, DELETE). Same public-read RLS exception as `machines`
+(`migrations/004_accessories.sql`) since chat needs to read it without a
+service-key path.
+
+RAG ingestion reuses `app/documents.py`'s existing chunk/embed/Qdrant-upsert
+machinery via a new `ingest_accessory()` — one Qdrant point per accessory
+(name + description, rarely needs chunking), payload tagged
+`record_type: "accessory"` so it's distinguishable from machine chunks if
+that's ever needed. Deleting or deactivating an accessory removes its Qdrant
+point (`delete_accessory_from_index`) — note this is *not* what `machines`
+does today; `delete_machine` leaves its Qdrant chunks behind. Don't assume
+parity between the two catalogs' delete behavior.
+
+`app/prompts.py`'s `SYSTEM_PROMPT` was rewritten in the same pass (2026-08-27)
+for shorter replies, an explicit cross-questioning framework (company,
+location, project type, timeline), and recommending accessories alongside a
+machine once one's been identified — still bound by the existing "never
+invent a spec" rule. Prompt-only change; no new tools, no `agent.py`
+structural change.
+
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status
 and PATCH category-override), `conversations` (inbox list, added
 2026-08-17 — see below), `conversations/{id}`, `overview`, `reports/{type}`,
 `customers` (+ PATCH), `opt-outs`, `summaries`, `logs`, `machines`
-(+ upload/text-add/delete). All require `X-API-Key`.
-There is **no unread/read-tracking concept anywhere in the schema.**
+(+ upload/text-add/delete/PATCH), `accessories` (+ POST/PATCH/DELETE, added
+2026-08-27 — see "Catalog: accessories/parts" above). All require
+`X-API-Key`. There is **no unread/read-tracking concept anywhere in the
+schema.**
 
 `GET /api/conversations?limit=50&channel=telegram` is the Telegram inbox
 list endpoint: every conversation (not just ones the intelligence pass has

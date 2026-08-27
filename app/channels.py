@@ -79,6 +79,31 @@ def to_telegram_html(text: str) -> str:
     return escaped
 
 
+def to_whatsapp_text(text: str) -> str:
+    """Render model output as WhatsApp's plain-text markup.
+
+    WhatsApp has no HTML/Markdown parse mode — it recognises a small fixed set
+    of inline markers in the raw message body: `*bold*` (single asterisk,
+    unlike Markdown's double), `_italic_`, and `~strikethrough~`. There is no
+    heading element and no native bullet — headings collapse to a bold line
+    and `- `/`* ` bullets become '• ', the same normalization to_telegram_html
+    does for the same reason (GPT-4o defaults to Markdown-shaped output
+    whether or not the prompt asks for it).
+
+    Deliberately the mirror of to_telegram_html rather than a shared helper:
+    the two platforms' bold syntax differs (`<b>` vs single `*`), and a single
+    function branching on channel would be harder to follow than two short
+    ones — see split_message below for the same reasoning already applied to
+    chunking.
+    """
+    result = _HEADING_RE.sub(r"*\1*", text)
+    result = _BULLET_RE.sub(r"\1• \2", result)
+    # **bold** -> *bold* (WhatsApp's single-asterisk syntax). Markdown's
+    # single *bold* is already valid WhatsApp markup, so it's left as-is.
+    result = re.sub(r"\*\*(.+?)\*\*", r"*\1*", result)
+    return result
+
+
 def split_message(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
     """Split a long reply on paragraph, then line, then hard boundaries.
 
@@ -442,7 +467,10 @@ class WhatsAppPortalAdapter(ChannelAdapter):
             ) as client:
                 conversation_id = await self._resolve_conversation(client, message.user_id)
                 for chunk in chunks:
-                    body: dict[str, Any] = {"to": message.user_id, "message": chunk}
+                    body: dict[str, Any] = {
+                        "to": message.user_id,
+                        "message": to_whatsapp_text(chunk),
+                    }
                     if conversation_id:
                         body["conversationId"] = conversation_id
                     response = await client.post(f"{self.base_url}/api/send-message", json=body)

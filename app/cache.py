@@ -181,6 +181,10 @@ def machines_list_key(category: str | None) -> str:
     return redis_client.build_key("cache", "machines", category or "all")
 
 
+def accessories_list_key(category: str | None) -> str:
+    return redis_client.build_key("cache", "accessories", category or "all")
+
+
 def rag_key(query: str) -> str:
     return redis_client.build_key("cache", "rag", _hash(_normalize_query(query)))
 
