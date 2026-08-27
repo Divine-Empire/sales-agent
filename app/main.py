@@ -114,7 +114,6 @@ async def _deliver(reply: Any, user_id: str, conversation_id: str) -> None:
     on their answer, the sales team does not."""
     await telegram.send(
         OutgoingMessage(channel=Channel.TELEGRAM, user_id=user_id, text=reply.text),
-        keyboard=True,
     )
     for note in reply.notifications:
         text = build_notification(note, conversation_id)

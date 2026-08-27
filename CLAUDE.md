@@ -440,6 +440,25 @@ overriding a lead's category is a correction, not a permanent lock.
 - `GROQ_MODEL` must be `openai/gpt-oss-120b`, not the bare model name — Groq
   404s otherwise, and that only surfaces when the primary model is already
   down.
+- The first prompt rewrite for concise/qualifying replies (2026-08-27) used
+  soft language ("weave these in as the conversation gives you an opening",
+  "let the conversation lead") for the qualifying questions. In real use the
+  model took that as license to skip qualifying indefinitely — a whole
+  Telegram conversation went by (services, then a specific total station
+  model, then spec details) with zero questions asked back about company,
+  project, location, or timeline; it just kept answering. Fixed same day by
+  making qualifying mandatory: goal #5 now says a reply that is only product
+  information with no question and no next step is a mistake, and the
+  "Qualifying" section frames it as "you are always missing at least one of
+  these until you have all of them," not an optional nicety. If you're
+  touching `app/prompts.py`'s qualifying language again, keep it phrased as
+  a requirement, not a suggestion — the soft version measurably didn't work.
+- Telegram's quick-reply keyboard (the button row above the input box,
+  `app/commands.py`'s old `QUICK_REPLIES` + `TelegramAdapter.send`'s
+  `keyboard` param) was removed entirely 2026-08-27, at the client's
+  request — it was visual clutter next to the actual qualifying
+  conversation the prompt now runs. `TelegramAdapter.send` no longer takes
+  a `keyboard` argument at all; don't reintroduce it without asking first.
 
 ## Conventions
 
