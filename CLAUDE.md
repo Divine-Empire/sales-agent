@@ -578,6 +578,30 @@ overriding a lead's category is a correction, not a permanent lock.
   separately, so a Render log filter on "reply_guard" tells you everything
   about how often this fires and whether it's actually working, without
   needing to correlate against a customer's screenshot.
+- A third client requirement, same day: never volunteer a price unless the
+  customer actually asked for one. Tried prompt-only first — a hard rule in
+  `app/prompts.py` PLUS a worked example matching the exact failing query
+  ("IM-55 ke bare mein batao" should get specs with zero rupee amounts) —
+  and it failed 5/5 in local testing against the real pipeline, same
+  pattern as the catalog-dump case. Prompt instructions are a strong nudge
+  on GPT-4o, never a hard guarantee; anything phrased as "never do X" that
+  actually matters needs the code-level backstop, not more prompt tuning.
+  Added a second post-generation guard in `app/agent.py`, structurally
+  identical to the catalog-dump one: `_asked_for_price()` checks the
+  CUSTOMER's message (not the reply) for actual price-intent words (price,
+  cost, rate, budget, kitna, keemat, etc.) — deliberately a plain regex, not
+  a fuzzy judgement, since unlike bullets-vs-no-bullets there's no
+  legitimate ambiguous case here. If the reply contains a ₹/Rs/INR amount
+  and the customer's message didn't ask for one, `_strip_unrequested_price()`
+  runs one more cheap completion to rewrite the price out — a real rewrite
+  (drops the pricing clause/sentence, keeps everything else), not a regex
+  string-delete, which would leave broken grammar behind ("available at ."
+  after deleting "₹2,89,000"). Same `_triggered`/`_result`/`_did_not_fix`
+  logging pattern as the catalog-dump guard, prefixed `reply_price_guard_*`.
+  Verified: 5/5 "tell me about X" replies came back price-free with specs
+  intact; 3/3 "what's the price of X" replies correctly still had the price.
+  These two guards run sequentially (not `elif`), since a reply could in
+  principle trip both at once.
 
 ## Conventions
 

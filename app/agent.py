@@ -54,6 +54,25 @@ _BULLET_LINE_RE = re.compile(r"^\s*[•\-*]\s+|^\s*\d+[.)]\s+", re.MULTILINE)
 CATALOG_DUMP_MIN_BULLET_LINES = 3
 CATALOG_DUMP_MIN_CHARS = 400
 
+# Second post-generation guard: the client does not want a price volunteered
+# unless the customer actually asked for one — confirmed the prompt-only
+# version of this rule (an explicit hard rule plus a worked example matching
+# the exact failing query) still failed 5/5 in testing, the same pattern as
+# the catalog-dump case above. A rupee amount in the reply is unambiguous —
+# unlike bullet-vs-no-bullet, there's no legitimate reason a price-less
+# question should ever get one back, so this check is a plain regex on the
+# CUSTOMER's message, not a fuzzy content judgement.
+_RUPEE_RE = re.compile(r"₹|\brs\.?\s*\d|\bINR\b", re.IGNORECASE)
+_PRICE_INTENT_RE = re.compile(
+    r"price|cost|rate|quote|quotation|budget|kitna|kitne|kimat|keemat|daam|rupees?",
+    re.IGNORECASE,
+)
+
+
+def _asked_for_price(customer_text: str) -> bool:
+    return bool(_PRICE_INTENT_RE.search(customer_text))
+
+
 # Tool schemas. Descriptions tell the model WHEN to call, not just what it does
 # — these are part of the prompt and are written with the same care.
 TOOLS: list[dict[str, Any]] = [
@@ -401,6 +420,47 @@ async def _compress_reply(text: str, conversation_id: str) -> str:
         return text
 
 
+async def _strip_unrequested_price(text: str, conversation_id: str) -> str:
+    """Rewrite a reply to remove a price the customer didn't ask for.
+
+    A plain regex removal of the ₹ amount would leave broken grammar behind
+    ("which is available at ." after deleting "₹2,89,000") — a rewrite call
+    keeps everything else about the reply (specs, the qualifying question)
+    intact and just drops the pricing sentence/clause entirely. Returns the
+    original text on any failure, matching _compress_reply's fail-open
+    behavior — a price the customer didn't ask for is a smaller problem than
+    losing an otherwise-correct reply to a guard-call error."""
+    try:
+        response = await complete(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite the message below to remove any price, cost, or rupee amount "
+                        "— the customer did not ask for pricing, so it should not be mentioned "
+                        "at all. Keep everything else (specs, recommendations, the question at "
+                        "the end) exactly as it is, just remove the price and any sentence that "
+                        "exists only to state it. Reply with only the rewritten message, "
+                        "nothing else."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.1,
+            conversation_id=conversation_id,
+        )
+        rewritten = (response.content or "").strip()
+        if not rewritten:
+            log.warning("reply_guard_price_strip_empty", extra={"conversation_id": conversation_id})
+            return text
+        return rewritten
+    except LLMUnavailableError:
+        log.warning(
+            "reply_guard_price_strip_call_failed", extra={"conversation_id": conversation_id}
+        )
+        return text
+
+
 async def handle_message(message: IncomingMessage) -> AgentReply:
     """Process one inbound message and produce a reply.
 
@@ -578,38 +638,72 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
             if ctx.handover_triggered
             else prompts.ERROR_MESSAGE
         )
-    elif _looks_like_catalog_dump(reply_text):
-        # See _looks_like_catalog_dump / _compress_reply above: the prompt's
-        # "short, no bullets" rule and a lower temperature both help, but
-        # neither guarantees it — confirmed live against production. This is
-        # the hard backstop. Logged before AND after so this is verifiable
-        # from Render's logs alone: "guard_triggered" always fires the moment
-        # a dump is caught, "guard_result" reports what the compression call
-        # actually did — still_flagged tells you outright whether it worked,
-        # rather than requiring a human to read the compressed text and judge.
-        original_chars = len(reply_text)
-        log.info(
-            "reply_guard_triggered",
-            extra={"conversation_id": conversation_id, "original_chars": original_chars},
-        )
-        compressed = await _compress_reply(reply_text, conversation_id)
-        still_flagged = _looks_like_catalog_dump(compressed)
-        log.info(
-            "reply_guard_result",
-            extra={
-                "conversation_id": conversation_id,
-                "original_chars": original_chars,
-                "compressed_chars": len(compressed),
-                "unchanged": compressed == reply_text,
-                "still_flagged": still_flagged,
-            },
-        )
-        if still_flagged:
-            log.warning(
-                "reply_guard_did_not_fix",
-                extra={"conversation_id": conversation_id, "compressed_chars": len(compressed)},
+    else:
+        # Two independent post-generation guards — a reply could in theory
+        # trip both, so these run sequentially rather than as elif branches.
+        # See _looks_like_catalog_dump / _compress_reply and
+        # _asked_for_price / _strip_unrequested_price above: the prompt's
+        # rules (short/no-bullets, price-only-if-asked) and a lower
+        # temperature both help, but neither guarantees it — both confirmed
+        # live against production, the price rule failing 5/5 in testing
+        # even with an explicit worked example. These are the hard backstop.
+        # Logged before AND after so each is verifiable from Render's logs
+        # alone: "_triggered" always fires the moment a violation is caught,
+        # "_result" reports what the rewrite call actually did — the
+        # still-violating flag is the direct answer to "did it work", rather
+        # than requiring a human to read the rewritten text and judge.
+        if _looks_like_catalog_dump(reply_text):
+            original_chars = len(reply_text)
+            log.info(
+                "reply_guard_triggered",
+                extra={"conversation_id": conversation_id, "original_chars": original_chars},
             )
-        reply_text = compressed
+            compressed = await _compress_reply(reply_text, conversation_id)
+            still_flagged = _looks_like_catalog_dump(compressed)
+            log.info(
+                "reply_guard_result",
+                extra={
+                    "conversation_id": conversation_id,
+                    "original_chars": original_chars,
+                    "compressed_chars": len(compressed),
+                    "unchanged": compressed == reply_text,
+                    "still_flagged": still_flagged,
+                },
+            )
+            if still_flagged:
+                log.warning(
+                    "reply_guard_did_not_fix",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "compressed_chars": len(compressed),
+                    },
+                )
+            reply_text = compressed
+
+        if _RUPEE_RE.search(reply_text) and not _asked_for_price(message.text):
+            original_chars = len(reply_text)
+            log.info(
+                "reply_price_guard_triggered",
+                extra={"conversation_id": conversation_id, "original_chars": original_chars},
+            )
+            stripped = await _strip_unrequested_price(reply_text, conversation_id)
+            still_has_price = bool(_RUPEE_RE.search(stripped))
+            log.info(
+                "reply_price_guard_result",
+                extra={
+                    "conversation_id": conversation_id,
+                    "original_chars": original_chars,
+                    "stripped_chars": len(stripped),
+                    "unchanged": stripped == reply_text,
+                    "still_has_price": still_has_price,
+                },
+            )
+            if still_has_price:
+                log.warning(
+                    "reply_price_guard_did_not_fix",
+                    extra={"conversation_id": conversation_id, "stripped_chars": len(stripped)},
+                )
+            reply_text = stripped
 
     if is_whatsapp_first_message:
         # Lead with the company intro, then the model's actual answer to
