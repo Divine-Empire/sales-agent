@@ -37,8 +37,18 @@ from app.logging_config import get_logger, setup_logging
 setup_logging()
 log = get_logger(__name__)
 
+# analyse_or_raise, not analyse: analyse() itself always returns None rather
+# than raising (app/main.py's inline fallback caller must never have a
+# scoring failure disturb the customer's turn), which meant a job that did
+# genuinely fail — LLM unavailable, bad tool-call JSON — looked identical to
+# a successful one from here: no exception, _handle_entry below acks and
+# marks it processed regardless. Found via a real customer's lead score
+# staying stale through an automated run with zero pending/dead-lettered
+# jobs to explain it. analyse_or_raise (app/intelligence.py) wraps the same
+# work but raises on that None, so a genuine failure now retries with
+# backoff and eventually dead-letters instead of silently vanishing.
 _HANDLERS = {
-    jobs.JOB_TYPE_INTELLIGENCE: lambda job: intelligence.analyse(job.conversation_id),
+    jobs.JOB_TYPE_INTELLIGENCE: lambda job: intelligence.analyse_or_raise(job.conversation_id),
 }
 
 

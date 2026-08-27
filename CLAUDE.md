@@ -602,6 +602,41 @@ overriding a lead's category is a correction, not a permanent lock.
   intact; 3/3 "what's the price of X" replies correctly still had the price.
   These two guards run sequentially (not `elif`), since a reply could in
   principle trip both at once.
+- A real customer's lead score stayed stale (Cold/15) for several minutes
+  after a message ("order kar do", a bulk order — about as strong a buying
+  signal as exists) while the automated pipeline had zero pending jobs and
+  zero dead-lettered ones to explain it. Root cause turned out to be an
+  observability gap, not a scoring bug: manually re-running
+  `intelligence.analyse()` on the same conversation immediately produced the
+  correct result (Hot/75), proving the model itself was fine — but
+  `analyse()` never called `store.log_ai_event`, so its LLM call left no
+  trace anywhere queryable; every entry in `/api/logs` for that conversation
+  turned out to be a normal customer-facing agent turn (identifiable by
+  `retrieved_chunks`, which `analyse()` never produces), not the analysis
+  job. Worse: `analyse()`'s own contract is "return `None` on any failure,
+  never raise" (deliberately, since its OTHER caller —
+  `app/main.py`'s inline fallback when job-enqueueing itself fails — must
+  never let a scoring failure disturb the customer's turn), but
+  `app/worker.py`'s job handler saw that clean `None` return as success:
+  no exception meant `xack` + `mark_processed` regardless of whether
+  anything was actually written. A genuinely failed analysis job (LLM
+  unavailable, bad tool-call JSON) would have looked identical to a
+  successful one, with no retry and no dead-letter entry to reveal it.
+  Fixed same day: `analyse()` now calls `store.log_ai_event` on both its
+  success and LLM-unavailable paths (same `AiLogEvent.LLM_CALL`/`ERROR`
+  types the per-turn call uses, so `/api/logs` now shows both — distinguish
+  by the absence of `retrieved_chunks`, which only the customer-facing turn
+  produces). A new `analyse_or_raise()` wraps the same work but raises
+  `AnalysisFailedError` on that `None` instead of swallowing it;
+  `app/worker.py`'s `_HANDLERS` now points at `analyse_or_raise`, not
+  `analyse` — so a genuine failure retries with backoff and eventually
+  dead-letters like every other job failure, while `app/main.py`'s inline
+  fallback caller still uses plain `analyse()` and keeps its original never-
+  raise guarantee. If you ever add another job type whose work function was
+  written to fail open (return `None`/a sentinel rather than raise), give it
+  the same `_or_raise` wrapper before wiring it into `app/worker.py` — the
+  bare version quietly defeats the whole retry/dead-letter mechanism Phase E
+  was built for.
 
 ## Conventions
 

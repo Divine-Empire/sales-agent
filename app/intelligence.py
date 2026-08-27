@@ -20,7 +20,7 @@ import json
 from typing import Any
 
 from app import store
-from app.enums import CustomerIntent, Language, LeadCategory
+from app.enums import AiLogEvent, CustomerIntent, Language, LeadCategory
 from app.llm import LLMUnavailableError, complete
 from app.logging_config import get_logger
 from app.models import ConversationSummary, LeadScore, parse_conversation_id
@@ -196,7 +196,27 @@ async def analyse(conversation_id: str, customer_id: str | None = None) -> dict[
         )
     except LLMUnavailableError:
         log.warning("analysis_llm_unavailable", extra={"conversation_id": conversation_id})
+        await store.log_ai_event(
+            conversation_id, AiLogEvent.ERROR, payload={"stage": "analysis_llm_unavailable"}
+        )
         return None
+
+    # Logged here, not just in app.llm — this call previously left NO trace
+    # anywhere queryable (not /api/logs, which only ever showed the customer-
+    # facing turn's own llm_call), which made a genuinely-stale lead score
+    # indistinguishable from "the job silently never ran." Same event type
+    # the per-turn agent call uses, so a filter on llm_call in /api/logs now
+    # shows both, distinguishable by the absence of retrieved_chunks here
+    # (this call never runs RAG).
+    await store.log_ai_event(
+        conversation_id,
+        AiLogEvent.LLM_CALL,
+        model=response.model,
+        prompt_tokens=response.prompt_tokens,
+        completion_tokens=response.completion_tokens,
+        latency_ms=response.latency_ms,
+        payload={"stage": "intelligence_analyse", "used_fallback": response.used_fallback},
+    )
 
     if not response.tool_calls:
         log.warning("analysis_no_tool_call", extra={"conversation_id": conversation_id})
@@ -287,3 +307,29 @@ async def analyse(conversation_id: str, customer_id: str | None = None) -> dict[
         "summary": _text(data.get("summary")),
         "next_action": _text(data.get("next_action")),
     }
+
+
+class AnalysisFailedError(RuntimeError):
+    """Raised only by analyse_or_raise — see its docstring."""
+
+
+async def analyse_or_raise(conversation_id: str, customer_id: str | None = None) -> dict[str, Any]:
+    """Same work as analyse(), but raises instead of returning None on
+    failure — for app/worker.py only.
+
+    analyse() intentionally swallows every failure (LLM unavailable, bad
+    tool-call JSON, no history) and returns None, because its OTHER caller
+    (app/main.py's inline fallback, used when job enqueueing itself fails)
+    must never let a scoring failure disturb the customer's turn. But that
+    same contract meant the job worker's _handle_entry saw a clean return
+    and called xack + mark_processed regardless — a real conversation's
+    scoring job "succeeded" while genuinely writing nothing, and nothing
+    told the worker to retry or dead-letter it. Found via a real customer's
+    stale lead score that a manual re-run immediately corrected once run
+    directly (Hot/75 instead of a stale Cold/15) — the job had clearly
+    consumed its stream entry without producing that result automatically.
+    """
+    result = await analyse(conversation_id, customer_id)
+    if result is None:
+        raise AnalysisFailedError(f"analyse() returned None for {conversation_id}")
+    return result
