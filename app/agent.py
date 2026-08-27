@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from app import commands, locks, prompts, rag, store
@@ -38,6 +39,20 @@ from app.models import (
 log = get_logger(__name__)
 
 MAX_TOOL_ITERATIONS = 3
+
+# Post-generation guard for the "bulleted catalog dump" failure mode: prompt
+# instructions and a lower temperature (app/config.py) both reduce how often
+# GPT-4o ignores the "short, no bullets" rules, but neither is a hard
+# guarantee — confirmed live: the same deployed code, same low temperature,
+# still produced a 346-completion-token bulleted reply on a fresh
+# conversation. Rather than capping llm_max_output_tokens (which would risk
+# truncating a genuinely long reply mid-sentence when the customer actually
+# asked for a comparison or full list), a reply is only compressed AFTER
+# generation, and only when it's unambiguously bot-shaped — several bullet
+# lines AND long. A short reply, or one with a single bullet, is left alone.
+_BULLET_LINE_RE = re.compile(r"^\s*[•\-*]\s+|^\s*\d+[.)]\s+", re.MULTILINE)
+CATALOG_DUMP_MIN_BULLET_LINES = 3
+CATALOG_DUMP_MIN_CHARS = 400
 
 # Tool schemas. Descriptions tell the model WHEN to call, not just what it does
 # — these are part of the prompt and are written with the same care.
@@ -339,6 +354,48 @@ async def _run_tool(name: str, raw_args: str, ctx: ToolContext) -> str:
         return "Error: that action could not be completed. Continue the conversation."
 
 
+def _looks_like_catalog_dump(text: str) -> bool:
+    """Conservative detector for the specific failure this guards against —
+    several bullet/numbered lines AND real length. A single bullet, or a
+    short reply, is left alone; the customer may have genuinely asked for a
+    comparison or full list, which the prompt explicitly allows."""
+    bullet_lines = len(_BULLET_LINE_RE.findall(text))
+    return bullet_lines >= CATALOG_DUMP_MIN_BULLET_LINES and len(text) >= CATALOG_DUMP_MIN_CHARS
+
+
+async def _compress_reply(text: str, conversation_id: str) -> str:
+    """One extra, cheap completion that rewrites an over-long bulleted reply
+    into 1-3 plain sentences — a self-correction pass, not a blind
+    truncation, so no information is lost mid-sentence the way capping
+    llm_max_output_tokens would risk. Returns the original text on any
+    failure, so a compression-call error never costs the customer their
+    (long but complete) answer."""
+    try:
+        response = await complete(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite the message below as 1-3 short plain sentences, the way a "
+                        "person would type it in chat. No bullet points, no numbered lists, "
+                        "no headings. Keep only the single most relevant item or two — drop "
+                        "the rest rather than summarizing everything. End with the same "
+                        "question the original message asked, if it asked one. Reply with "
+                        "only the rewritten message, nothing else."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.1,
+            conversation_id=conversation_id,
+        )
+        compressed = (response.content or "").strip()
+        return compressed or text
+    except LLMUnavailableError:
+        log.warning("reply_compression_failed", extra={"conversation_id": conversation_id})
+        return text
+
+
 async def handle_message(message: IncomingMessage) -> AgentReply:
     """Process one inbound message and produce a reply.
 
@@ -516,6 +573,16 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
             if ctx.handover_triggered
             else prompts.ERROR_MESSAGE
         )
+    elif _looks_like_catalog_dump(reply_text):
+        # See _looks_like_catalog_dump / _compress_reply above: the prompt's
+        # "short, no bullets" rule and a lower temperature both help, but
+        # neither guarantees it — confirmed live against production. This is
+        # the hard backstop.
+        log.info(
+            "reply_compressed",
+            extra={"conversation_id": conversation_id, "original_chars": len(reply_text)},
+        )
+        reply_text = await _compress_reply(reply_text, conversation_id)
 
     if is_whatsapp_first_message:
         # Lead with the company intro, then the model's actual answer to

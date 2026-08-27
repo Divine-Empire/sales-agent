@@ -536,19 +536,37 @@ overriding a lead's category is a correction, not a permanent lock.
   the old bulleted-catalog-dump behavior on a genuinely fresh conversation
   (no history-imitation possible) with the new code confirmed live via
   Render's deploy log AND `/api/logs` (`used_fallback: false`, model
-  `gpt-4o` — ruled out a Groq-fallback theory too). Re-running the exact
-  same queries locally against production immediately after was consistently
-  short and compliant. Conclusion: not a bug, not a stale deploy — this was
-  `llm_temperature` (0.3) variance. `/api/logs` showed the reverted turn's
-  `completion_tokens` at 346 vs ~20-40 on compliant turns — a real, visible
-  signal of "the model wrote a long list this time," not a phantom. Lowered
-  `llm_temperature` to `0.15` (`app/config.py`, 2026-08-27) — 6/6 local runs
-  post-change stayed in the 27-45 completion-token range. This does not
-  *guarantee* compliance (no temperature does), it tightens it — if a
-  bulleted dump is ever reported again after this, don't assume the prompt
-  regressed; check `/api/logs`'s `completion_tokens` for that turn first,
-  since occasional variance at any nonzero temperature is expected, not a
-  new bug to chase.
+  `gpt-4o` — ruled out a Groq-fallback theory too). `/api/logs` showed the
+  reverted turn's `completion_tokens` at 346 vs ~20-40 on compliant turns.
+  First attempted fix: lowered `llm_temperature` 0.3 -> 0.15 (`app/config.py`)
+  — 6/6 local runs immediately after looked compliant, but **the exact same
+  bulleted-dump behavior recurred live 10 minutes after that fix was
+  confirmed deployed** (verified against Render's exact deploy-live
+  timestamp, not just "deployed" — see the note below about always getting
+  the precise time, not a yes/no). So temperature alone was not sufficient;
+  a prompt instruction and a lower temperature are both a *nudge*, never a
+  hard guarantee, and 600 tokens (`llm_max_output_tokens`) is easily enough
+  room for a full bulleted catalog even at low temperature.
+  Real fix (`app/agent.py`, same day): a post-generation guard, not another
+  prompt tweak. `_looks_like_catalog_dump()` flags a reply only when it is
+  unambiguously bot-shaped — 3+ bullet/numbered lines AND 400+ characters,
+  deliberately conservative so a genuine short comparison (2 bullets, one
+  question) is never touched. A flagged reply goes through
+  `_compress_reply()`, one extra cheap completion (temperature 0.1) that
+  rewrites it into 1-3 plain sentences, keeping only the most relevant
+  item(s) and the original question — a real rewrite, not a truncation, so
+  nothing is cut off mid-sentence the way capping `llm_max_output_tokens`
+  would risk. Falls back to the original text on any compression-call
+  failure. This is a hard backstop on top of the prompt/temperature layers,
+  not a replacement for them — it only ever fires on the failure case, and
+  costs nothing extra when the model already replied correctly.
+  Verified: the detector correctly flags the original 1050-char bulleted
+  reply and leaves a legitimate 231-char 2-bullet comparison alone;
+  compression turns the flagged reply into a 177-char plain sentence that
+  no longer flags; 10/10 fresh runs through the real `_handle_message_locked`
+  path (Supabase writes monkeypatched, LLM calls real) stayed clean without
+  the guard needing to fire even once, meaning temperature + guard together
+  now cover both the common case and the tail.
 
 ## Conventions
 
