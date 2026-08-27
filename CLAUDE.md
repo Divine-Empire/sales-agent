@@ -567,6 +567,17 @@ overriding a lead's category is a correction, not a permanent lock.
   path (Supabase writes monkeypatched, LLM calls real) stayed clean without
   the guard needing to fire even once, meaning temperature + guard together
   now cover both the common case and the tail.
+  The guard's logging (same day) is verifiable from Render's logs alone,
+  without reading transcripts: `reply_guard_triggered` fires the moment a
+  dump is caught (`original_chars`); `reply_guard_result` reports what
+  compression actually did (`compressed_chars`, `unchanged`,
+  `still_flagged` — the direct yes/no answer to "did it work"); a `WARNING`-
+  level `reply_guard_did_not_fix` fires if compression ran but the result is
+  still flagged, and `reply_guard_compression_call_failed` /
+  `reply_guard_compression_empty` cover the LLM-call-itself-failed case
+  separately, so a Render log filter on "reply_guard" tells you everything
+  about how often this fires and whether it's actually working, without
+  needing to correlate against a customer's screenshot.
 
 ## Conventions
 

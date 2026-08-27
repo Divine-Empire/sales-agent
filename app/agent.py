@@ -390,9 +390,14 @@ async def _compress_reply(text: str, conversation_id: str) -> str:
             conversation_id=conversation_id,
         )
         compressed = (response.content or "").strip()
-        return compressed or text
+        if not compressed:
+            log.warning("reply_guard_compression_empty", extra={"conversation_id": conversation_id})
+            return text
+        return compressed
     except LLMUnavailableError:
-        log.warning("reply_compression_failed", extra={"conversation_id": conversation_id})
+        log.warning(
+            "reply_guard_compression_call_failed", extra={"conversation_id": conversation_id}
+        )
         return text
 
 
@@ -577,12 +582,34 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
         # See _looks_like_catalog_dump / _compress_reply above: the prompt's
         # "short, no bullets" rule and a lower temperature both help, but
         # neither guarantees it — confirmed live against production. This is
-        # the hard backstop.
+        # the hard backstop. Logged before AND after so this is verifiable
+        # from Render's logs alone: "guard_triggered" always fires the moment
+        # a dump is caught, "guard_result" reports what the compression call
+        # actually did — still_flagged tells you outright whether it worked,
+        # rather than requiring a human to read the compressed text and judge.
+        original_chars = len(reply_text)
         log.info(
-            "reply_compressed",
-            extra={"conversation_id": conversation_id, "original_chars": len(reply_text)},
+            "reply_guard_triggered",
+            extra={"conversation_id": conversation_id, "original_chars": original_chars},
         )
-        reply_text = await _compress_reply(reply_text, conversation_id)
+        compressed = await _compress_reply(reply_text, conversation_id)
+        still_flagged = _looks_like_catalog_dump(compressed)
+        log.info(
+            "reply_guard_result",
+            extra={
+                "conversation_id": conversation_id,
+                "original_chars": original_chars,
+                "compressed_chars": len(compressed),
+                "unchanged": compressed == reply_text,
+                "still_flagged": still_flagged,
+            },
+        )
+        if still_flagged:
+            log.warning(
+                "reply_guard_did_not_fix",
+                extra={"conversation_id": conversation_id, "compressed_chars": len(compressed)},
+            )
+        reply_text = compressed
 
     if is_whatsapp_first_message:
         # Lead with the company intro, then the model's actual answer to
