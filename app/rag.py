@@ -133,6 +133,18 @@ async def ensure_collection() -> bool:
                 vectors_config=models.VectorParams(size=VECTOR_SIZE, distance=DISTANCE),
             )
             log.info("qdrant_collection_created", extra={"collection": settings.qdrant_collection})
+        # Needed for _exact_code_matches's payload-filtered scroll — Qdrant
+        # requires an explicit index before a field can be used in a filter,
+        # and this was missing in production (discovered live: a real
+        # customer's exact model-code question got the wrong machine's specs
+        # because the correct chunk lost on vector similarity to a longer,
+        # richer document). create_payload_index is idempotent — safe to call
+        # on every startup, not just once at collection creation.
+        await client.create_payload_index(
+            collection_name=settings.qdrant_collection,
+            field_name="codes",
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
         return True
     except Exception:
         log.exception("qdrant_collection_failed")
@@ -250,6 +262,54 @@ def is_smalltalk(query: str) -> bool:
     return normalised in _SMALLTALK or normalised.rstrip("?.") in _SMALLTALK
 
 
+async def _exact_code_matches(
+    client: AsyncQdrantClient, query: str, conversation_id: str | None
+) -> list[RetrievedChunk]:
+    """Payload-filter lookup for model codes the customer typed, alongside
+    the dense vector search.
+
+    Found in production: a real customer asked "IM-55 aur IM-105 mein kya
+    difference hai" and got "I don't have those details" even though both
+    codes are in the catalog — a richer, unrelated document (a full spec
+    sheet for a different model, same "Total Station"/"Sokkia" vocabulary)
+    outscored the sparse-but-correct price-table row on pure vector
+    similarity and pushed it out of the top-k. Vector search alone is
+    weakest exactly where a customer is most precise — typing an exact model
+    number — so codes extracted from the customer's OWN message get an exact
+    payload match as a supplement, not a replacement, for the vector search.
+    """
+    codes = extract_codes(query)
+    if not codes:
+        return []
+    try:
+        # A pure payload filter, no vector involved — scroll(), not
+        # query_points(), since there is nothing to rank by similarity here;
+        # a code either matches or it doesn't.
+        points, _ = await client.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=models.Filter(
+                must=[models.FieldCondition(key="codes", match=models.MatchAny(any=codes))]
+            ),
+            limit=len(codes) * 2,
+            with_payload=True,
+        )
+    except Exception:
+        log.exception(
+            "rag_code_match_failed", extra={"conversation_id": conversation_id, "codes": codes}
+        )
+        return []
+    return [
+        RetrievedChunk(
+            text=p.payload.get("text", ""),
+            score=1.0,  # exact code match — treated as maximally relevant
+            machine_code=(p.payload.get("codes") or [None])[0],
+            category=p.payload.get("category"),
+        )
+        for p in points
+        if p.payload
+    ]
+
+
 async def search(
     query: str, *, limit: int | None = None, conversation_id: str | None = None
 ) -> list[RetrievedChunk]:
@@ -295,12 +355,25 @@ async def search(
             for p in response.points
             if p.payload
         ]
+
+        # Exact code matches go first and are never dropped for a lower-scoring
+        # vector hit — see _exact_code_matches's docstring for the real failure
+        # this fixes. Deduped by text so an exact match already surfaced by the
+        # vector search isn't repeated, then the combined list is capped back
+        # to `limit` so this never grows the context beyond what it was before.
+        exact = await _exact_code_matches(client, query, conversation_id)
+        if exact:
+            seen_text = {c.text for c in exact}
+            merged = exact + [c for c in chunks if c.text not in seen_text]
+            chunks = merged[:limit]
+
         log.info(
             "rag_search",
             extra={
                 "conversation_id": conversation_id,
                 "query": query[:80],
                 "hits": len(chunks),
+                "exact_code_hits": len(exact),
                 "top_score": round(chunks[0].score, 3) if chunks else 0.0,
             },
         )

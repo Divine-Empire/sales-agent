@@ -503,6 +503,35 @@ overriding a lead's category is a correction, not a permanent lock.
   content-alongside-tool-calls narration is non-deterministic. If you touch
   this tool loop again, do not reintroduce echoing `response.content` on a
   tool-call turn.
+- Found the same way (local simulation against the real pipeline): a real
+  question — "IM-55 aur IM-105 mein kya difference hai", both genuine
+  catalog codes — got "I don't have those specific details" even though
+  both are in the catalog. Root cause was retrieval quality, not the
+  prompt: Qdrant holds BOTH the original `knowledge_base.md` price-table row
+  for IM-55/IM-105 AND much longer, richer spec-sheet documents uploaded
+  later for a different Sokkia series (iM-62, iM-65, iM-100, FX-201/202,
+  via the dashboard's upload path). On pure vector similarity, the longer
+  documents' shared vocabulary ("Sokkia", "Total Station", technical specs)
+  outscored the correct-but-sparse price-table row and pushed it out of the
+  top-`rag_top_k` results. Also found in the process: `store.get_machine_by_code`
+  (`app/store.py`) was already built for exactly this — its own docstring
+  says "vector search is weakest exactly here" — but was never called from
+  anywhere in the live agent path; it was dead code.
+  Fixed in `app/rag.py`: `search()` now runs `_exact_code_matches()`
+  alongside the vector search — `extract_codes()` (already used at
+  ingestion time) applied to the CUSTOMER's message, then an exact payload
+  filter (`scroll()` with a `codes` match, not `query_points()` — there is
+  nothing to rank by similarity for an exact filter) against Qdrant, scored
+  `1.0` and merged to the front of the result list, deduped, capped back to
+  `rag_top_k` so context size is unchanged. This needed a payload index on
+  `codes` that did not exist in production — `client.scroll()`'s filter
+  400'd with "Index required but not found" until `ensure_collection()`
+  (`app/rag.py`, already called on every document ingest) was extended to
+  also call `create_payload_index` (idempotent, safe on every call) and the
+  index was created once directly against production to make the fix live
+  immediately rather than waiting for the next upload. Verified end-to-end:
+  the same comparison question now returns the correct ₹2,89,000 / ₹3,90,000
+  prices and a real comparison instead of a decline.
 
 ## Conventions
 
