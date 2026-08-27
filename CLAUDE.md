@@ -459,6 +459,26 @@ overriding a lead's category is a correction, not a permanent lock.
   request — it was visual clutter next to the actual qualifying
   conversation the prompt now runs. `TelegramAdapter.send` no longer takes
   a `keyboard` argument at all; don't reintroduce it without asking first.
+- The mandatory-qualifying fix above (same day) fixed the "never asks
+  anything" problem but immediately surfaced a second real one: a vague
+  open-ended question like "machines ke bare mein batao" got answered with
+  the ENTIRE catalog — four categories, twelve machines, every price — as a
+  bulleted/numbered list, with a qualifying question just tacked on at the
+  end. Technically satisfied goal #5 (a question was asked) but violated
+  everything else — not short, not one thing at a time, and formatted like
+  a bot's structured menu rather than a person typing. Root cause: "Never
+  dump everything you know" had a loophole ("unless the customer explicitly
+  asked for a full list") and the model treated an open-ended question as
+  implicitly asking for one. Fixed by: (1) explicitly stating a vague
+  question is an opening, not a catalog request — name one or two broad
+  areas, then ask what they need, only listing specifics once the customer
+  has given enough context; (2) banning bullets/numbered lists/bold
+  headers in normal replies outright, since a human doesn't format chat
+  messages like a spec sheet. `app/channels.py`'s `to_telegram_html`/
+  `to_whatsapp_text` markdown-to-platform-markup conversion is unrelated
+  and still needed as a safety net for whatever formatting slips through
+  despite the prompt — don't remove it thinking the prompt fix makes it
+  redundant.
 
 ## Conventions
 
