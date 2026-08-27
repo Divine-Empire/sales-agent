@@ -252,6 +252,33 @@ async def clear_history(conversation_id: str) -> bool:
         return False
 
 
+async def has_prior_messages(conversation_id: str) -> bool:
+    """True if this conversation already has at least one stored message.
+
+    Used to detect a customer's genuine first contact (for the WhatsApp
+    auto-greeting — see app/agent.py) without loading full history. Call
+    this BEFORE saving the current turn's message, or it always returns
+    True. Fails closed (returns True) on a lookup error, so a transient
+    Supabase issue never causes a repeat customer to get the greeting again
+    — a missed greeting is a smaller problem than a duplicated one.
+    """
+    client = await get_client()
+    if client is None:
+        return True
+    try:
+        result = (
+            await client.table("messages")
+            .select("id")
+            .eq("conversation_id", conversation_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception:
+        log.exception("has_prior_messages_failed", extra={"conversation_id": conversation_id})
+        return True
+
+
 async def get_history(conversation_id: str, limit: int | None = None) -> list[Message]:
     """Last N messages in chronological order, ready for the LLM.
 

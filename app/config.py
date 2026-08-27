@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # this can ship dark and be flipped on deliberately.
     whatsapp_agent_enabled: bool = False
 
+    # Corporate brochure, linked from the first-contact greeting on both
+    # channels (app/commands.py's GREETING_MESSAGE). Must be a direct-download
+    # URL — a Google Drive "share" link serves an HTML preview page, not the
+    # PDF bytes, and reads as broken when a customer taps it in chat. Empty
+    # disables the "Brochure:" line rather than sending a dead link.
+    brochure_url: str = ""
+
     # Redis (optional operational layer — Addition.md).
     #
     # Redis is never the system of record. Every feature here must be safe to
