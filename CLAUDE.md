@@ -532,6 +532,23 @@ overriding a lead's category is a correction, not a permanent lock.
   immediately rather than waiting for the next upload. Verified end-to-end:
   the same comparison question now returns the correct ₹2,89,000 / ₹3,90,000
   prices and a real comparison instead of a decline.
+- After all the prompt fixes above, a real Telegram conversation still hit
+  the old bulleted-catalog-dump behavior on a genuinely fresh conversation
+  (no history-imitation possible) with the new code confirmed live via
+  Render's deploy log AND `/api/logs` (`used_fallback: false`, model
+  `gpt-4o` — ruled out a Groq-fallback theory too). Re-running the exact
+  same queries locally against production immediately after was consistently
+  short and compliant. Conclusion: not a bug, not a stale deploy — this was
+  `llm_temperature` (0.3) variance. `/api/logs` showed the reverted turn's
+  `completion_tokens` at 346 vs ~20-40 on compliant turns — a real, visible
+  signal of "the model wrote a long list this time," not a phantom. Lowered
+  `llm_temperature` to `0.15` (`app/config.py`, 2026-08-27) — 6/6 local runs
+  post-change stayed in the 27-45 completion-token range. This does not
+  *guarantee* compliance (no temperature does), it tightens it — if a
+  bulleted dump is ever reported again after this, don't assume the prompt
+  regressed; check `/api/logs`'s `completion_tokens` for that turn first,
+  since occasional variance at any nonzero temperature is expected, not a
+  new bug to chase.
 
 ## Conventions
 

@@ -18,7 +18,16 @@ class Settings(BaseSettings):
     groq_base_url: str = "https://api.groq.com/openai/v1"
     embedding_model: str = "text-embedding-3-small"
     llm_timeout_seconds: float = 30.0
-    llm_temperature: float = 0.3
+    # Lowered from 0.3 (2026-08-27): the system prompt's conciseness/no-bullets/
+    # mandatory-qualifying rules held up in most tests but not all — the same
+    # code, same model, same prompt occasionally reverted to a long bulleted
+    # catalog dump on the exact same query that got a short plain-sentence
+    # reply moments earlier, confirmed via app/logs (completion_tokens spiking
+    # to 300+ on the reverted turns vs ~20-40 on the compliant ones). That's
+    # temperature-driven variance, not a prompt bug — a lower temperature
+    # doesn't guarantee compliance but measurably tightens it, at the cost of
+    # slightly less varied phrasing turn to turn.
+    llm_temperature: float = 0.15
     llm_max_output_tokens: int = 600
 
     # OCR (scanned-PDF fallback, app/llm.py transcribe_image / app/documents.py).
