@@ -495,6 +495,78 @@ edited its document, deleted it, then confirmed via a direct Qdrant scroll
 that zero points remained for that `machine_id` — the delete route's Qdrant
 call now returns 200, not the silent-orphan 400 it used to.
 
+### Verbatim spec preservation + multi-model detection in profile structuring (2026-08-30)
+
+Two real quality gaps surfaced by the client comparing a real Sokkia FX-200
+series brochure's raw text against its extracted dashboard output:
+
+**1. Specs were being summarized into vague prose.** "Reflectorless range:
+0.3 to 800m" came back as "long measurement range" — every number dropped.
+Fixed with a new `_FIELD_GUIDANCE` dict appended to the `features` field's
+tool-schema description, plus a new paragraph in `PROFILE_PROMPT` explicitly
+forbidding number-to-prose compression: a spec sheet's Features section
+should come out long and specific, not short and generic. Length is not the
+problem; vagueness is.
+
+**2. Distinct models in one document were collapsed into one generic
+profile.** The FX-200-series brochure genuinely describes two different
+models — FX-201 and FX-202 — with different accuracy/range/price each. The
+original single-profile `structure_product_profile()` produced one
+"FX-200 Series" profile and silently dropped which spec belonged to which
+model. The client explicitly chose the harder fix over manual workaround:
+make structuring itself detect multiple models from one upload.
+
+`structure_product_profile()` (`app/documents.py`) now returns
+`list[dict[str, str]] | None` instead of a single dict — `PROFILE_TOOL`'s
+schema changed to a `variants[]` array, each entry carrying its own
+`model_name` plus the same 13 sections as before. Most documents describe
+one model and come back as a single-item list; a document that genuinely
+gives separate models their own specs comes back with one entry per model.
+
+**The prompt alone was not sufficient** — verified live, matching the
+established pattern in this codebase (the catalog-dump and price guards):
+even with an explicit "count the models in the source, match the count"
+instruction, the same two-model test text came back with only one variant
+(silently dropping the second) in 3 of 5 runs at temperature 0.1. A prompt
+instruction is a strong nudge on GPT-4o, never a hard guarantee. Fixed with
+a code-level backstop: `_find_model_codes()` scans the raw source text for
+codes sharing the product's own family prefix (derived from the machine
+name via `_model_family_prefix` — e.g. "Sokkia FX-200 Series" → prefix
+`FX`), scoped deliberately narrow so an unrelated code-shaped token in the
+same document (a battery pack `BDC70`, an IP rating `IP66`) is never
+mistaken for a missed model — an earlier unscoped version of this check did
+exactly that and fabricated bogus "BDC70"/"IP66" variants, caught before
+shipping. If the first structuring call returned fewer variants than
+distinct family-matching codes found in the source, one retry runs with an
+instruction naming exactly which codes were missed. Verified: 5/5 clean
+runs after this fix (both FX-201 and FX-202 present every time, no bogus
+variants), versus 3/5 failures with the prompt-only version; a genuine
+single-model document with a sibling model only mentioned in passing (not
+specced) correctly still returns one variant, 3/3 runs — no false-positive
+splitting.
+
+`add_machine_from_document()` now creates one `machines` row, one
+`machine_document`, and one RAG-ingested document **per detected variant**,
+each with its own `machine_code` (extracted from the variant's own
+model_name, e.g. "Sokkia FX-201 Total Station" → code `FX-201`) — this is
+what actually prevents mixed retrieval later: `rag._exact_code_matches()`
+and Qdrant's `machine_id` payload filter both key off these per-variant
+codes, so a customer asking about FX-201 gets FX-201's exact-match chunk
+prioritized, not a blend with FX-202's numbers. Verified end-to-end against
+real Supabase/Qdrant: uploading the two-model test document produced two
+separate `machines` rows; searching "FX-202 accuracy and price" correctly
+returned zero mention of FX-201's price, confirming exact-code priority
+works per-variant exactly as it does for manually-created machines.
+Response shape stays backward compatible — `variants_detected`/`variants`
+are new fields; the single-model case's top-level `machine_id`/`name`/
+`characters_extracted` etc. are unchanged (the first/only variant's values).
+
+**Not yet done**: the existing "SOKKIA FIX-200 Series" machine/document
+already live in production (uploaded 2026-08-30, before this fix) still
+reflects the old collapsed profile — it needs a re-upload to split into
+separate FX-201/FX-202 machines under the new behavior; this hasn't been
+triggered yet.
+
 ### Cross-machine matching — enrich the RAG query with what's already known (2026-08-28)
 
 `rag.search()` was only ever given the customer's single current message.
