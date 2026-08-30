@@ -1135,6 +1135,39 @@ overriding a lead's category is a correction, not a permanent lock.
   the same `_or_raise` wrapper before wiring it into `app/worker.py` — the
   bare version quietly defeats the whole retry/dead-letter mechanism Phase E
   was built for.
+- A real production WhatsApp transcript surfaced two more prompt gaps after
+  the multiple-types-under-one-machine work (2026-08-30). First: a bare
+  "Hii" with nothing else in it got answered with a specific product pitch
+  ("hum Sokkia total station provide karte hain...") — the existing
+  vague-open-question guidance ("tell me about your machines" gets a
+  category + a question) was being applied to a plain greeting too, which
+  has even less signal than an open question does. Fixed with an explicit
+  rule: a bare greeting gets a greeting + one open question back, no
+  product/category name at all. Second, and more interesting: the same
+  conversation asked about "boundary survey" (no exact model code) and got
+  Sokkia FX-201 recommended directly, with FX-202 never mentioned — root
+  cause was retrieval order, not a language bug. Since "Variants live under
+  one machine" above, both types live in the SAME document, and
+  `_exact_code_matches` (the mechanism that resolves ambiguity when a
+  customer types an exact code) never fires when they don't type one — so
+  a vague answer like "Boundary" falls back to plain vector similarity,
+  which returns the document as one chunk with FX-201's section appearing
+  first (an artifact of `format_profile_markdown`'s list order, not a
+  recommendation). The model had no rule telling it that first-in-context
+  isn't the same as best-fit, so it silently defaulted to whichever type it
+  saw first. Fixed with a new hard rule: when the context lists more than
+  one "Type" under one machine and the customer's stated need doesn't
+  already point to a specific one, ask the one differentiating question
+  (precision level, budget, etc.) before naming a type, and when naming
+  one, say briefly why that type over the others fits what they said.
+  Verified against the real pipeline (llm.complete + prompts.build_messages,
+  no Supabase writes) with both FX-201 and FX-202 in context: 3/3 clean
+  runs on "Hii" (greeting + open question, no product named), 3/3 clean
+  runs on "Boundary" (asked the accuracy differentiator before naming
+  either type) — plus a regression check confirming an exact-code question
+  ("FX-201 ka price kya hai") still answers directly and a genuine open
+  product question still gets a category + qualifying question, so neither
+  fix narrowed those existing correct behaviors.
 
 ## Conventions
 
