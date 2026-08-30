@@ -373,6 +373,33 @@ async def _run_tool(name: str, raw_args: str, ctx: ToolContext) -> str:
         return "Error: that action could not be completed. Continue the conversation."
 
 
+def _enrich_search_query(message_text: str, summary: dict[str, Any] | None) -> str:
+    """Fold the customer's already-collected requirement (from save_lead's
+    conversation_summaries row) into the RAG query, not just this one
+    message.
+
+    Pure keyword/vector similarity on a single short message ("total station
+    chahiye") can't distinguish between machines in the same category — it
+    has no way to weigh a customer's stated project type, location, or
+    requirements against a rich product profile's "Who should (not) buy it"
+    section. Once qualifying has captured that context, feeding it into
+    every subsequent search lets retrieval do that matching instead of
+    leaving it to chance on whichever single message triggered this turn's
+    search. Degrades to the plain message when there's no summary yet (a
+    conversation's first few turns, or if Supabase is unreachable) — this is
+    an enrichment, not a requirement.
+    """
+    if not summary:
+        return message_text
+    extra = [
+        summary.get("requirements"),
+        " ".join(summary.get("interested_machines") or []),
+        summary.get("location"),
+    ]
+    extra_text = " ".join(part for part in extra if isinstance(part, str) and part.strip())
+    return f"{message_text} {extra_text}".strip() if extra_text else message_text
+
+
 def _looks_like_catalog_dump(text: str) -> bool:
     """Conservative detector for the specific failure this guards against —
     several bullet/numbered lines AND real length. A single bullet, or a
@@ -531,13 +558,16 @@ async def _handle_message_locked(message: IncomingMessage) -> AgentReply:
         )
         return AgentReply(text=canned, model="command")
 
-    # Retrieval and history are independent — running them together saves
-    # 200-400ms per turn. Retrieval failure is not fatal: the agent answers
-    # without context and logs it.
-    chunks, history_rows = await asyncio.gather(
-        rag.search(message.text, conversation_id=conversation_id),
+    # History and the existing summary (if save_lead has already captured
+    # one) are independent of each other, so fetched together — the summary
+    # is needed before retrieval can run (see _enrich_search_query), which is
+    # why it can't join the same gather as rag.search below.
+    history_rows, summary = await asyncio.gather(
         store.get_history(conversation_id),
+        store.get_summary(conversation_id),
     )
+    search_query = _enrich_search_query(message.text, summary)
+    chunks = await rag.search(search_query, conversation_id=conversation_id)
     context_block = rag.build_context(chunks)
 
     history = [

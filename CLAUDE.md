@@ -459,6 +459,38 @@ edited its document, deleted it, then confirmed via a direct Qdrant scroll
 that zero points remained for that `machine_id` — the delete route's Qdrant
 call now returns 200, not the silent-orphan 400 it used to.
 
+### Cross-machine matching — enrich the RAG query with what's already known (2026-08-28)
+
+`rag.search()` was only ever given the customer's single current message.
+That's fine for a specific question ("IM-55 ka price kya hai") but breaks
+down for a vague follow-up once qualifying has already captured real
+context — "aur kya options hain" carries no product keyword at all, so pure
+vector similarity has nothing to match against. Confirmed directly: that
+exact query against production Qdrant returned **zero hits** on its own.
+
+`app/agent.py`'s `_enrich_search_query()` folds the existing
+`conversation_summaries` row (`requirements`, `interested_machines`,
+`location` — whatever `save_lead` already captured this conversation) into
+the query text before every search, not just the bare message. Degrades to
+the plain message when there's no summary yet (early turns, or a Supabase
+hiccup) — an enrichment, not a dependency. Wired in by reshaping the
+existing `asyncio.gather(rag.search(...), store.get_history(...))`: the
+summary fetch now runs alongside `get_history` (both plain Supabase reads,
+independent of each other), and `rag.search` runs after, since it depends
+on the enriched query — a small latency tradeoff for materially better
+matches on vague follow-ups.
+
+Verified: the same vague query ("aur kya options hain isse alag") that
+returned 0 hits alone returned 4 relevant hits once enriched with a saved
+requirement of "road project, compact power tool, small site" +
+"Walk Behind Roller" + "Raipur", topped by the Compaction Equipment
+catalog section. End-to-end through the real turn-handling path
+(`_handle_message_locked`, Supabase writes monkeypatched): after a customer
+described a road project in Raipur and got Walk Behind Roller recommended,
+the same vague follow-up correctly got Ride-On Road Roller (a genuine
+alternative in the same category) rather than losing the thread onto an
+unrelated category.
+
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status
