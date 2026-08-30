@@ -628,10 +628,32 @@ async def save_machine_document(
     source_url: str | None = None,
 ) -> str | None:
     """Store extracted document text. Keeping it in Postgres means re-embedding
-    never requires re-parsing the original file."""
+    never requires re-parsing the original file.
+
+    Deletes any existing machine_documents rows for this machine_id first —
+    re-uploading (or a multi-variant document re-processed under the same
+    machine) used to just INSERT again, leaving the previous document
+    sitting alongside the new one forever. Found live: the dashboard's
+    "Uploaded documents" list showed two rows for one machine after a
+    single re-upload, both indexed at different times, with no indication
+    which one the machine's current content/Qdrant chunks actually reflect
+    (get_machine_document/the View/Edit modal always resolves the LATEST
+    one, so the stale row was silent clutter rather than a wrong-answer
+    risk — but clutter that would only grow with every future re-upload).
+    One machine document per machine is the actual intent everywhere else
+    in this codebase (ingest_document's own re-ingest already replaces
+    Qdrant's chunks the same way); this makes Postgres match that. A
+    delete failure here is swallowed, not fatal — worse case is the old
+    duplicate-row behavior returns for this one call, not a lost upload.
+    """
     client = await get_client()
     if client is None:
         return None
+    if machine_id:
+        try:
+            await client.table("machine_documents").delete().eq("machine_id", machine_id).execute()
+        except Exception:
+            log.exception("machine_document_pre_delete_failed", extra={"machine_id": machine_id})
     try:
         result = (
             await client.table("machine_documents")
