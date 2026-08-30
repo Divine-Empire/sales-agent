@@ -367,6 +367,47 @@ machine once one's been identified — still bound by the existing "never
 invent a spec" rule. Prompt-only change; no new tools, no `agent.py`
 structural change.
 
+## Product knowledge depth — optional rich profiles (added 2026-08-28)
+
+`data/product_profile_template.md` documents an optional, deeper per-product
+content shape — What it does / Who should (not) buy it / Features / Benefits
+/ Price / Competitors / Advantages / Limitations / Common objections +
+Responses / FAQs / Upselling opportunities — as a `###` sub-heading per
+product, same chunking convention `data/knowledge_base.md` already uses.
+This is additive, not a required migration: today's sparse price-table rows
+keep working exactly as they do now; this shape exists for products worth
+going deeper on, filled in by whoever maintains the catalog content, not by
+this codebase.
+
+The reasoning: the agent's prompt already instructs it to never invent a
+spec and never recite retrieved content verbatim, but that instruction is
+only useful if the underlying facts actually exist in what gets retrieved.
+A price-table row answers "what does it cost," not "why this over the
+competitor" or "what do I say when they push back on price" — the agent
+either declines (correct, but unhelpful) or drifts toward plausible-sounding
+invention (exactly what the never-invent rule exists to prevent) when asked
+something a sparse row can't answer. Objections/Responses/FAQs close that
+gap, written as facts and talking points for the agent to draw from and
+reformulate, explicitly NOT as a script — `app/prompts.py`'s context-
+injection message (`build_messages`) now says as much directly: use the
+substance of a matching objection/FAQ entry in your own words, never copy
+the written response verbatim or announce "here's a common objection."
+
+Same pass, `app/prompts.py` also added: a decision-maker question to
+Qualifying (phrased conversationally — "yeh order aap khud finalize kar
+lenge ya kisi aur se bhi confirm karna hoga", never "are you the decision
+maker"), urgency folded into the existing timeline question, and four new
+hard rules — never claim something is guaranteed, never argue with the
+customer past one correction, disclose being an AI if asked directly (never
+volunteer it, never deny it), and confirm understanding of the customer's
+need in one line before recommending a machine (skippable only when a
+single message already made the need completely unambiguous, e.g. an exact
+model code). Verified locally against the real pipeline: the decision-maker
+question came out conversational rather than form-like, the guarantee guard
+correctly said "I can't guarantee that" while staying helpful, and the
+AI-disclosure question got a direct, non-evasive answer that didn't derail
+the conversation.
+
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status
