@@ -231,13 +231,28 @@ PROFILE_SECTIONS = [
 # without falling back to "I'll check with the team" on a spec that was
 # genuinely right there in the source document.
 _FIELD_GUIDANCE = {
+    "what_it_does": (
+        " Include any application/use-case write-ups the document gives (e.g. "
+        "'Boundary and Cadastral Survey', 'Topographic Survey' sections explaining what the "
+        "product is used for and how) — not just a one-line functional summary. If the "
+        "document spends a paragraph explaining a use case, that content belongs here, in full."
+    ),
     "features": (
         " List specs with their exact numbers/units as given in the document "
         "(ranges, accuracy figures, weights, battery life, included accessories, "
         "connectivity specs) — do not summarize a number into a generic "
         "description. 'Reflectorless range: 0.3 to 800m' stays exactly that, "
         "never becomes 'reflectorless laser measurement'. If the document gives "
-        "you ten specs, keep ten specs."
+        "you ten specs, keep ten specs. Also include named onboard software/feature packages "
+        "(e.g. an onboard field-software suite and what it does), standard package contents/"
+        "included accessories, and any named feature systems (e.g. a guide-light or "
+        "target-locating system) with their actual described behavior — not just their name."
+    ),
+    "benefits": (
+        " Include what named features/use-cases actually mean for the buyer, drawing on any "
+        "feature-explanation or comparison content in the document (e.g. a comparison against "
+        "a previous/other model's accuracy or range) — do not compress a paragraph explaining "
+        "a benefit into a single generic sentence if the document gives more detail than that."
     ),
 }
 
@@ -279,7 +294,9 @@ PROFILE_TOOL: dict[str, Any] = {
                         "(e.g. a 'series' brochure with a spec table listing different "
                         "accuracy/range/price per model). Do not split a document that just "
                         "mentions related products in passing — only when it gives each one "
-                        "its own real specs."
+                        "its own real specs. Never add a separate entry for the bare series "
+                        "name itself (e.g. no extra 'FX-200' entry alongside real 'FX-201' and "
+                        "'FX-202' entries) — the series name is not itself a sellable model."
                     ),
                     "items": {
                         "type": "object",
@@ -327,6 +344,20 @@ content answers ones a reasonable buyer would ask — you may synthesize a reaso
 FROM material that is actually present, but do not introduce facts, numbers, or claims that
 aren't grounded in the document itself. If in doubt, leave the section null.
 
+DO NOT LOSE CONTENT THAT DOESN'T NEATLY FIT ONE SECTION — a real brochure has far more than a
+spec table: application/use-case write-ups ("Boundary and Cadastral Survey", "Topographic
+Survey", explanations of what a specific feature does and why it helps), named software/feature
+descriptions (e.g. an onboard field-software package and its capabilities), included accessories/
+standard package contents, and comparison callouts against a previous/other model — all of this
+is real content the sales team paid for and needs, even when it isn't phrased as a bullet-point
+spec. If it doesn't fit Features, put it in Benefits (what a feature or use-case means for the
+buyer) or What it does (a fuller functional description) — but it must land SOMEWHERE in your
+output, not be silently dropped because it didn't fit a section's expected shape. A profile that
+is shorter than what the source document actually contains is a failure, exactly the same
+category of failure as inventing content that isn't there — the goal is completeness AND
+accuracy, not brevity. If the source is a rich, detailed brochure, your profile should be rich
+and detailed too, not compressed to a handful of one-line specs.
+
 MULTIPLE MODELS IN ONE DOCUMENT — READ THIS CAREFULLY, IT IS A COMMON CASE, NOT AN EDGE CASE:
 Before writing anything, scan the ENTIRE document text for every distinct model number/name it
 mentions (e.g. "FX-201", "FX-202", "iM-55", "iM-65"). Build a mental list of every one you find.
@@ -346,6 +377,11 @@ FX-201", never the generic series name "FX-200 Series"). Never merge two models'
 numbers into one generic profile, and never let one model's specs leak into another's entry.
 Content that applies to the whole series (shared accessories, shared warranty, a general
 description) may be repeated across each variant's own profile where relevant.
+
+Do NOT add an extra variants[] entry for the series itself. "FX-200 Series" or "FX-200" is a
+brand/family label, not a sellable model — if the real models are FX-201 and FX-202, your output
+has exactly two entries (FX-201, FX-202), never a third one named after the family/series. Only
+create an entry for something a customer could actually order by that name.
 
 Conversely, do not manufacture variants that aren't really there — a document that just mentions
 a sibling product in passing, with no separate specs of its own, describes ONE model; return a
@@ -378,11 +414,110 @@ def _find_model_codes(text: str, family_prefix: str | None) -> set[str]:
     sanity-check the LLM's variant count against what the document itself
     actually mentions for THIS product line, not for retrieval, and
     deliberately not for unrelated codes (battery packs, IP ratings,
-    accessory part numbers) that happen to also look code-shaped."""
+    accessory part numbers) that happen to also look code-shaped.
+
+    Also excludes the bare series/family code itself when the text has real
+    numbered siblings (e.g. "FX-200" is dropped when "FX-201"/"FX-202" are
+    also present) — the same "round number" heuristic as
+    _drop_redundant_series_variant, so this count doesn't manufacture a
+    phantom "missed variant" out of the series name and trigger a pointless
+    retry when the model already correctly returned every real model.
+    """
     if not family_prefix:
         return set()
     codes = {m.group(1).replace(" ", "-").upper() for m in _MODEL_CODE_RE.finditer(text)}
-    return {c for c in codes if not c.isdigit() and c.split("-")[0] == family_prefix}
+    family_codes = {c for c in codes if not c.isdigit() and c.split("-")[0] == family_prefix}
+
+    def digits_of(code: str) -> str | None:
+        parts = code.split("-", 1)
+        return parts[1] if len(parts) == 2 and parts[1].isdigit() else None
+
+    digit_sets = {c: digits_of(c) for c in family_codes}
+    result = set()
+    for code, digits in digit_sets.items():
+        if digits is None:
+            result.add(code)
+            continue
+        is_round = len(digits) >= 2 and set(digits[1:]) == {"0"}
+        siblings = sum(
+            1
+            for other, other_digits in digit_sets.items()
+            if other != code
+            and other_digits is not None
+            and len(other_digits) == len(digits)
+            and other_digits[0] == digits[0]
+            and other_digits != digits
+        )
+        if is_round and siblings >= 2:
+            continue
+        result.add(code)
+    return result
+
+
+def _drop_redundant_series_variant(profiles: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop a bogus generic "series" entry the model sometimes adds alongside
+    the real numbered variants it already extracted correctly.
+
+    Found live on gpt-5.6-terra (not seen on gpt-4o): given a document with
+    real FX-201 and FX-202 variants, it consistently added a THIRD entry
+    named after the bare series ("Sokkia FX-200" / "Sokkia FX-200 Series")
+    whose own content is just a restatement of "available models: FX-201
+    and FX-202" — not a real distinct model, and not asked for by the
+    prompt (the prompt now explicitly forbids this too, but as established
+    elsewhere in this codebase a prompt instruction alone is a nudge, never
+    a guarantee — this is the code-level backstop).
+
+    Detected narrowly: a variant's own code shares the same letter prefix
+    and the same number of digits as at least two OTHER variants' codes,
+    AND its own digits are "round" (every digit after the first is zero —
+    200, 500, not 201, 202) while the others' are not. A round number
+    sharing a leading digit with two non-round siblings is the family/series
+    label, not a fourth real model — e.g. "200" is dropped when "201" and
+    "202" are both present, but a genuine third real model like "FX-210"
+    (not round) is never touched.
+    """
+    if len(profiles) < 2:
+        return profiles
+
+    def parts_of(name: str) -> tuple[str, str] | None:
+        match = re.search(r"([A-Za-z]{1,4})-?(\d{2,5})[A-Za-z]?", name)
+        if not match:
+            return None
+        return match.group(1).upper(), match.group(2)
+
+    parsed = [parts_of(p.get("model_name", "")) for p in profiles]
+    keep: list[dict[str, str]] = []
+    for i, profile in enumerate(profiles):
+        this = parsed[i]
+        if this is None:
+            keep.append(profile)
+            continue
+        this_prefix, this_digits = this
+        # A "round" family number: every digit after the first is zero
+        # (200, 100, 50 -> "500", etc.) — real model numbers in this
+        # numbering style (201, 202) are never round in the same way.
+        is_round = len(this_digits) >= 2 and set(this_digits[1:]) == {"0"}
+        siblings = 0
+        if is_round:
+            for j, other in enumerate(parsed):
+                if j == i or other is None:
+                    continue
+                other_prefix, other_digits = other
+                if (
+                    other_prefix == this_prefix
+                    and len(other_digits) == len(this_digits)
+                    and other_digits[0] == this_digits[0]
+                    and other_digits != this_digits
+                ):
+                    siblings += 1
+        if is_round and siblings >= 2:
+            log.info(
+                "profile_structuring_dropped_series_label",
+                extra={"model_name": profile.get("model_name")},
+            )
+            continue
+        keep.append(profile)
+    return keep or profiles
 
 
 async def _structure_profile_call(
@@ -405,7 +540,12 @@ async def _structure_profile_call(
             ],
             tools=[PROFILE_TOOL],
             temperature=0.1,  # extraction, not conversation — low variance wins
-            max_output_tokens=4000,  # a multi-variant document needs a full profile per model
+            # A rich, detailed brochure (application write-ups, feature
+            # explanations, package contents, comparison callouts — not just
+            # a bare spec table) genuinely needs more room per variant than a
+            # sparse spec sheet does; 4000 was found live to truncate a real
+            # detailed brochure's content before it fit.
+            max_output_tokens=8000,
             conversation_id=conversation_id,
         )
     except LLMUnavailableError:
@@ -446,7 +586,7 @@ async def _structure_profile_call(
         profile["model_name"] = model_name.strip()
         profiles.append(profile)
 
-    return profiles or None
+    return _drop_redundant_series_variant(profiles) or None
 
 
 async def structure_product_profile(
@@ -528,27 +668,204 @@ async def structure_product_profile(
             "sections_filled": sum(len(p) - 1 for p in profiles),
         },
     )
+    profiles = await _enrich_missing_sections(profiles, machine_name, conversation_id)
     return profiles or None
 
 
-def format_profile_markdown(profile: dict[str, str], machine_name: str) -> str:
-    """Render a single variant's structured profile as `##`/`###` markdown —
-    the same shape `data/knowledge_base.md` uses, so chunk_text's paragraph/
-    heading-based splitting handles it with no changes.
+# Sections worth enriching with general industry knowledge when the source
+# document is silent on them — a spec sheet routinely has no Competitors,
+# Objections, or FAQs section at all, but a sales rep still benefits from a
+# generic, clearly-labeled starting point rather than a blank one. Deliberately
+# excludes what_it_does/who_should_(not)_buy/features/benefits: those must
+# stay grounded in the actual source document (verbatim specs matter most
+# there) and are already usually filled when the document has real content —
+# enriching them risks quietly overwriting a genuine "the document doesn't
+# say" with a plausible-sounding guess about a specific product's behavior.
+_ENRICHABLE_SECTIONS = {
+    "price",
+    "competitors",
+    "advantages",
+    "limitations",
+    "common_objections",
+    "responses",
+    "faqs",
+    "upselling_opportunities",
+}
 
-    `machine_name` is the heading title — callers pass the variant's own
-    model_name when a document produced more than one variant, so each
-    resulting document/Qdrant chunk is self-describing rather than sharing a
-    generic series title across genuinely different models.
+# Prepended to every enriched section so the sales team (and this codebase's
+# own PATCH-to-edit flow) can tell at a glance which content came from the
+# source document versus the model's own general knowledge — the client
+# asked for exactly this generation, but "asked for it" is not the same as
+# "should look brochure-verified when it isn't."
+_AI_ESTIMATE_PREFIX = "[AI estimate — not from the source document; verify before relying on it]\n"
+
+_ENRICHMENT_PROMPT = """You are helping a sales team fill in gaps in a product profile for
+{machine_name}, a {category} product. The source brochure/spec sheet only covered some
+sections — the ones listed below are genuinely missing from it.
+
+Using your own general knowledge of this PRODUCT CATEGORY and typical products like it (NOT
+by searching the web, and NOT by inventing specifics about THIS exact model that you don't
+actually know), give a reasonable, clearly-general starting point for each missing section.
+Write at the level of "what's typically true for this class of product," not as if you have
+verified facts about this specific model — e.g. for Price, a plausible market range for this
+category is fine; a specific rupee figure claimed as this exact model's price is not, since you
+don't actually know it. For Competitors, name real, genuinely known competing brands/products in
+this category if you know them — do not invent brand names. For Objections/FAQs, use realistic,
+commonly-seen patterns for this category of purchase (budget concerns, comparison requests,
+timeline questions) rather than anything specific to this model that you can't actually verify.
+
+If you have no genuine general knowledge to offer for a section, leave it null — a missing
+section is fine, a made-up one is not.
+
+Known context about this specific product (from its actual source document, use this to make
+your answer relevant, but do not contradict it):
+{known_context}
+
+Missing sections to fill: {missing_keys}"""
+
+
+async def _enrich_missing_sections(
+    profiles: list[dict[str, str]], machine_name: str, conversation_id: str | None
+) -> list[dict[str, str]]:
+    """Fill in sections a source document didn't cover using the model's own
+    general category knowledge — explicitly labeled as such, never presented
+    as brochure-verified fact. Only touches _ENRICHABLE_SECTIONS, and only
+    when at least one of them is actually missing; a profile with everything
+    already filled costs nothing extra. Failures here are non-fatal — the
+    caller already has a perfectly good (if sparser) profile without this."""
+    enriched: list[dict[str, str]] = []
+    for profile in profiles:
+        missing = [k for k in _ENRICHABLE_SECTIONS if not profile.get(k)]
+        if not missing:
+            enriched.append(profile)
+            continue
+
+        known_context = "\n".join(
+            f"{label}: {profile[key]}"
+            for key, label in PROFILE_SECTIONS
+            if key != "model_name" and profile.get(key)
+        )
+        variant_label = profile.get("model_name", machine_name)
+        try:
+            response = await complete(
+                [
+                    {
+                        "role": "system",
+                        "content": _ENRICHMENT_PROMPT.format(
+                            machine_name=variant_label,
+                            category="industrial/construction equipment",
+                            known_context=known_context or "(nothing else known)",
+                            missing_keys=", ".join(missing),
+                        ),
+                    },
+                ],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "record_enrichment",
+                            "description": (
+                                "Record general-knowledge estimates for the missing sections only."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    key: {
+                                        "type": ["string", "null"],
+                                        "description": (
+                                            f"{label} — general category knowledge only, "
+                                            "null if you don't have any genuine basis for one."
+                                        ),
+                                    }
+                                    for key in missing
+                                    for _, label in [
+                                        next(s for s in PROFILE_SECTIONS if s[0] == key)
+                                    ]
+                                },
+                                "required": missing,
+                            },
+                        },
+                    }
+                ],
+                temperature=0.2,
+                max_output_tokens=1200,
+                conversation_id=conversation_id,
+            )
+        except LLMUnavailableError:
+            log.warning("profile_enrichment_llm_unavailable", extra={"machine": variant_label})
+            enriched.append(profile)
+            continue
+
+        if not response.tool_calls:
+            enriched.append(profile)
+            continue
+        try:
+            data = json.loads(response.tool_calls[0].function.arguments)
+        except json.JSONDecodeError:
+            enriched.append(profile)
+            continue
+        if not isinstance(data, dict):
+            enriched.append(profile)
+            continue
+
+        filled = 0
+        for key in missing:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                profile[key] = _AI_ESTIMATE_PREFIX + value.strip()
+                filled += 1
+        log.info(
+            "profile_enriched",
+            extra={"machine": variant_label, "missing": len(missing), "filled": filled},
+        )
+        enriched.append(profile)
+    return enriched
+
+
+def format_profile_markdown(
+    profile: dict[str, str] | list[dict[str, str]], machine_name: str
+) -> str:
+    """Render structured profile(s) as `##`/`###` markdown — the same shape
+    `data/knowledge_base.md` uses, so chunk_text's paragraph/heading-based
+    splitting handles it with no changes.
+
+    Accepts either a single variant's profile (one machine, one profile —
+    the ordinary case) or a list of variant profiles for a SINGLE machine
+    that genuinely has multiple types (e.g. "Sokkia FX-200 Series" covering
+    FX-201 and FX-202) — the client's own mental model is one machine with
+    variants underneath it, not several unrelated machines, so multiple
+    variants render as `### Type: {model_name}` sub-sections nested under
+    one `## {machine_name}` heading rather than as separate documents.
     """
+    if isinstance(profile, dict):
+        return _format_single_profile_markdown(profile, machine_name, heading_level="##")
+
     lines = [f"## {machine_name}", ""]
+    for variant in profile:
+        variant_name = variant.get("model_name", machine_name)
+        lines.append(f"### Type: {variant_name}")
+        lines.append("")
+        lines.append(_format_single_profile_markdown(variant, variant_name, heading_level="####"))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _format_single_profile_markdown(
+    profile: dict[str, str], heading_title: str, *, heading_level: str
+) -> str:
+    """One profile's sections at the given heading depth — the shared
+    renderer format_profile_markdown uses for both the single-variant case
+    (### sections under a ## title) and each variant nested inside a
+    multi-variant machine document (#### sections under a ### Type: title)."""
+    sub_level = heading_level + "#"
+    lines = []
     for key, label in PROFILE_SECTIONS:
         if key == "model_name":
             continue
         text = profile.get(key)
         if not text:
             continue
-        lines.append(f"### {label}")
+        lines.append(f"{sub_level} {label}")
         lines.append(text)
         lines.append("")
     return "\n".join(lines).strip()
@@ -633,7 +950,19 @@ async def ingest_document(
     if client is None:
         return {"chunks": len(chunks), "embedded": 0, "error": "vector store unavailable"}
 
-    codes = extract_codes(text)
+    # Strip AI-estimate paragraphs (see _AI_ESTIMATE_PREFIX) before pulling
+    # codes — found live: an enriched Competitors section naming real rival
+    # products ("Leica TS16/TS20", "Trimble S9") got its OWN model codes
+    # picked up into THIS machine's `codes` list, so a customer asking about
+    # "TS16" (a Leica product, never ours) would incorrectly exact-match this
+    # machine's chunk. The stored/RAG text keeps the full enrichment content
+    # either way — only the code-extraction input is narrowed.
+    codes_source = "\n\n".join(
+        para
+        for para in text.split("\n\n")
+        if not para.lstrip().startswith(_AI_ESTIMATE_PREFIX.strip())
+    )
+    codes = extract_codes(codes_source)
     if machine_code:
         codes = sorted({machine_code.upper(), *codes})
 
@@ -858,20 +1187,6 @@ async def delete_machine_from_index(machine_id: str) -> None:
         log.exception("machine_index_delete_failed", extra={"machine_id": machine_id})
 
 
-def _variant_machine_code(base_code: str, model_name: str, index: int) -> str:
-    """A distinct machine_code per detected variant — exact-code RAG lookup
-    (`rag._exact_code_matches`) and Qdrant payload filtering both key off
-    this, so two variants sharing one code would blur back together exactly
-    the way the original FX-201/FX-202 bug did. Prefer a code pulled from the
-    variant's own model name (e.g. "FX-201" out of "Sokkia FX-201 Total
-    Station") so it reads sensibly; fall back to base+index only if nothing
-    code-shaped is found in the name."""
-    match = re.search(r"[A-Za-z]{1,4}-?\d{2,5}[A-Za-z]?", model_name)
-    if match:
-        return match.group(0).upper().replace(" ", "-")[:40]
-    return f"{base_code}-{index + 1}"[:40]
-
-
 async def add_machine_from_document(
     *,
     name: str,
@@ -886,112 +1201,84 @@ async def add_machine_from_document(
     doc_type: DocumentType = DocumentType.BROCHURE,
 ) -> dict[str, Any]:
     """Full pipeline: extract, restructure into the rich product-profile
-    shape, persist the machine(s) and document(s), index for RAG.
+    shape, persist the machine and document, index for RAG.
 
     The client only wants to type one machine name and upload one document —
     everything else (What it does / Who should buy it / Objections /
     Responses / FAQs / etc., data/product_profile_template.md's shape) comes
-    from structure_product_profile analysing the extracted text. That
-    analysis can find more than one distinct model in a single document (a
-    "series" brochure listing separate specs per model, e.g. FX-201 vs
-    FX-202) — when it does, this creates one `machines` row, one
-    machine_document, and one RAG-ingested document PER detected variant,
-    each with its own machine_code, rather than merging them into one
-    profile. This is what keeps later retrieval from mixing the two models'
-    specs together: exact-code lookup and Qdrant payload filtering both key
-    off machine_code/machine_id, so distinct codes are what keeps "FX-201
-    accuracy" from ever answering with FX-202's number.
+    from structure_product_profile analysing the extracted text.
 
-    Falls back to one machine using the raw extracted text unchanged if
-    structuring fails entirely, so an LLM hiccup costs richness, never the
-    whole upload.
+    That analysis can find more than one distinct model/type in a single
+    document (a "series" brochure listing separate specs per model, e.g.
+    FX-201 vs FX-202) — per the client's own mental model, these are TYPES
+    of one machine, not separate machines: this creates exactly ONE
+    `machines` row (named after what was typed at upload, e.g. "Sokkia
+    FX-200 Series"), one `machine_document`, and one RAG-ingested document,
+    with each detected variant rendered as its own `### Type: {model_name}`
+    sub-section inside that single document (format_profile_markdown).
+    Retrieval still tells the variants apart correctly: `extract_codes` picks
+    up every variant's own model code from the combined document text (both
+    "FX-201" and "FX-202" appear in it), so an exact-code match on a
+    customer's specific question still prioritizes the right chunk — the
+    codes distinguish the *content*, they just no longer need a separate
+    `machine_id` to do it.
+
+    Falls back to storing the raw extracted text unchanged if structuring
+    fails entirely, so an LLM hiccup costs richness, never the whole upload.
     """
     text = await extract_text(data, filename, content_type)
     profiles = await structure_product_profile(text, name)
 
+    resolved_code = machine_code or name.upper().replace(" ", "-")[:40]
+    machine_id = await store.upsert_machine(
+        machine_code=resolved_code,
+        name=name,
+        category=category,
+        description=description,
+        price_range=price_range,
+        lead_time=lead_time,
+    )
+
     if not profiles:
-        machine_id = await store.upsert_machine(
-            machine_code=machine_code or name.upper().replace(" ", "-")[:40],
-            name=name,
-            category=category,
-            description=description,
-            price_range=price_range,
-            lead_time=lead_time,
-        )
-        await store.save_machine_document(
-            machine_id=machine_id,
-            doc_type=doc_type,
-            title=filename,
-            content=text,
-        )
-        result = await ingest_document(
-            machine_name=name,
-            category=category,
-            text=text,
-            machine_code=machine_code,
-            machine_id=machine_id,
-            doc_type=doc_type,
-            price_range=price_range,
-            source_filename=filename,
-        )
-        return {
-            "machine_id": machine_id,
-            "name": name,
-            "characters_extracted": len(text),
-            "profile_sections_filled": 0,
-            "variants_detected": 1,
-            **result,
-        }
+        stored_text = text
+        variants_detected = 1
+        sections_filled = 0
+    elif len(profiles) == 1:
+        stored_text = format_profile_markdown(profiles[0], name)
+        variants_detected = 1
+        sections_filled = len(profiles[0]) - 1
+    else:
+        stored_text = format_profile_markdown(profiles, name)
+        variants_detected = len(profiles)
+        sections_filled = sum(len(p) - 1 for p in profiles)
 
-    base_code = machine_code or name.upper().replace(" ", "-")[:40]
-    single_variant = len(profiles) == 1
-    created: list[dict[str, Any]] = []
+    await store.save_machine_document(
+        machine_id=machine_id,
+        doc_type=doc_type,
+        title=filename,
+        content=stored_text,
+    )
+    result = await ingest_document(
+        machine_name=name,
+        category=category,
+        text=stored_text,
+        machine_code=resolved_code,
+        machine_id=machine_id,
+        doc_type=doc_type,
+        price_range=price_range,
+        source_filename=filename,
+    )
 
-    for index, profile in enumerate(profiles):
-        variant_name = profile["model_name"] if not single_variant else name
-        variant_code = (
-            base_code if single_variant else _variant_machine_code(base_code, variant_name, index)
-        )
-        structured_text = format_profile_markdown(profile, variant_name)
-
-        machine_id = await store.upsert_machine(
-            machine_code=variant_code,
-            name=variant_name,
-            category=category,
-            description=description,
-            price_range=price_range,
-            lead_time=lead_time,
-        )
-        await store.save_machine_document(
-            machine_id=machine_id,
-            doc_type=doc_type,
-            title=filename if single_variant else f"{filename} — {variant_name}",
-            content=structured_text,
-        )
-        result = await ingest_document(
-            machine_name=variant_name,
-            category=category,
-            text=structured_text,
-            machine_code=variant_code,
-            machine_id=machine_id,
-            doc_type=doc_type,
-            price_range=price_range,
-            source_filename=filename,
-        )
-        created.append(
-            {
-                "machine_id": machine_id,
-                "name": variant_name,
-                "machine_code": variant_code,
-                "profile_sections_filled": len(profile) - 1,
-                **result,
-            }
-        )
-
-    primary = created[0]
     return {
-        **primary,
+        "machine_id": machine_id,
+        "name": name,
         "characters_extracted": len(text),
-        "variants_detected": len(created),
-        "variants": created,
+        "profile_sections_filled": sections_filled,
+        "variants_detected": variants_detected,
+        "variant_names": (
+            [p.get("model_name", name) for p in profiles]
+            if profiles and variants_detected > 1
+            else []
+        ),
+        **result,
     }

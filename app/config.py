@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     # slightly less varied phrasing turn to turn.
     llm_temperature: float = 0.15
     llm_max_output_tokens: int = 600
+    # GPT-5-family models (gpt-5, gpt-5.1, gpt-5.2, ... gpt-5.6-*) reject the
+    # `temperature` parameter outright (400 Bad Request) except on gpt-5.1+
+    # with reasoning_effort="none" — and use reasoning_effort instead of
+    # temperature to trade latency for answer quality. app/llm.py's
+    # complete() detects a GPT-5-family openai_model by name and swaps
+    # temperature for this setting automatically, so switching models is a
+    # config-only change. "low" favors the fast, short replies this agent's
+    # prompt already asks for; a slower/more-careful step (document
+    # structuring, lead-scoring) can still ask for higher effort by passing
+    # its own value through complete()'s reasoning_effort parameter.
+    llm_reasoning_effort: str = "low"
 
     # OCR (scanned-PDF fallback, app/llm.py transcribe_image / app/documents.py).
     # A dense spec-sheet page transcribed verbatim easily exceeds a normal

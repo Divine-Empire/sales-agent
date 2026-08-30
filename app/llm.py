@@ -100,18 +100,65 @@ def _extract(response: Any, model: str, provider: str, started: float) -> LLMRes
     )
 
 
+# Matches gpt-5, gpt-5-mini, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.6-sol, etc.
+# but not gpt-4o/gpt-4.1/gpt-40-something — anchored so a future "gpt-50-x"
+# name (unlikely, but not impossible) can't false-match.
+_GPT5_FAMILY_RE = re.compile(r"^gpt-5([.\-]|$)")
+
+
+def _is_gpt5_family(model: str) -> bool:
+    return bool(_GPT5_FAMILY_RE.match(model))
+
+
+def _apply_model_sampling(kwargs: dict[str, Any], model: str, reasoning_effort: str | None) -> None:
+    """Swap temperature for reasoning_effort on GPT-5-family models.
+
+    GPT-5-family models reject `temperature` outright (400 Bad Request) on
+    every release except gpt-5.1+ with reasoning_effort="none" — simplest
+    and most robust is to never send temperature to this family at all, and
+    send reasoning_effort instead, which is the parameter this family
+    actually uses to trade latency for answer quality. Mutates kwargs in
+    place; a no-op for gpt-4o and anything else outside the gpt-5 family, so
+    existing behavior for the current default model is unchanged.
+
+    Found live: with `tools` present, gpt-5.6-terra rejected ANY
+    reasoning_effort other than "none" on /v1/chat/completions — "Function
+    tools with reasoning_effort are not supported ... set reasoning_effort
+    to 'none'." This hits every tool-call caller in this codebase (the
+    agent's 3 tools, document-profile structuring, lead-scoring analysis),
+    so a configured effort is only honored for a plain chat completion;
+    whenever `tools` is present, effort is forced to "none" regardless of
+    what was requested — reasoning still happens, just not exposed as a
+    separate effort dial for this call shape on this API surface.
+    """
+    if not _is_gpt5_family(model):
+        return
+    kwargs.pop("temperature", None)
+    if kwargs.get("tools"):
+        kwargs["reasoning_effort"] = "none"
+    else:
+        kwargs["reasoning_effort"] = reasoning_effort or settings.llm_reasoning_effort
+
+
 async def complete(
     messages: list[dict[str, Any]],
     *,
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
     max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
     conversation_id: str | None = None,
 ) -> LLMResponse:
     """Run a chat completion, falling back to Groq on retryable failures.
 
     Raises LLMUnavailableError only when both providers are exhausted. Callers
     must catch it and still reply to the user — silence reads as broken.
+
+    `reasoning_effort` only applies to a GPT-5-family `openai_model` (see
+    _apply_model_sampling) — passed through so a caller doing something
+    slower/more-careful (document structuring, lead scoring) can ask for
+    more effort than the chat-reply default, without every caller needing
+    to know or care whether the configured model is GPT-5-family at all.
     """
     temperature = settings.llm_temperature if temperature is None else temperature
     kwargs: dict[str, Any] = {
@@ -136,9 +183,13 @@ async def complete(
     primary_error: Exception | None = None
 
     if primary is not None:
+        primary_kwargs = dict(kwargs)
+        _apply_model_sampling(primary_kwargs, settings.openai_model, reasoning_effort)
         started = time.perf_counter()
         try:
-            raw = await primary.chat.completions.create(model=settings.openai_model, **kwargs)
+            raw = await primary.chat.completions.create(
+                model=settings.openai_model, **primary_kwargs
+            )
             result = _extract(raw, settings.openai_model, "openai", started)
             log.info(
                 "llm_call",
@@ -180,9 +231,11 @@ async def complete(
     if fallback is None:
         raise LLMUnavailableError(f"no fallback configured; primary failed: {primary_error}")
 
+    fallback_kwargs = dict(kwargs)
+    _apply_model_sampling(fallback_kwargs, settings.groq_model, reasoning_effort)
     started = time.perf_counter()
     try:
-        raw = await fallback.chat.completions.create(model=settings.groq_model, **kwargs)
+        raw = await fallback.chat.completions.create(model=settings.groq_model, **fallback_kwargs)
         result = _extract(raw, settings.groq_model, "groq", started)
         result.used_fallback = True
         log.info(
@@ -220,6 +273,15 @@ async def transcribe_image(image_b64: str, *, prompt: str | None = None) -> str 
     if client is None:
         return None
     started = time.perf_counter()
+    ocr_kwargs: dict[str, Any] = {
+        "temperature": 0.0,
+        "max_completion_tokens": settings.ocr_max_output_tokens,
+        "timeout": settings.ocr_timeout_seconds,
+    }
+    # Same GPT-5-family incompatibility as complete() — a hardcoded
+    # temperature=0.0 here would 400 the moment openai_model is switched to
+    # any gpt-5* model, silently breaking OCR fallback for scanned PDFs.
+    _apply_model_sampling(ocr_kwargs, settings.openai_model, None)
     try:
         raw = await client.chat.completions.create(
             model=settings.openai_model,
@@ -244,9 +306,7 @@ async def transcribe_image(image_b64: str, *, prompt: str | None = None) -> str 
                     ],
                 }
             ],
-            temperature=0.0,
-            max_completion_tokens=settings.ocr_max_output_tokens,
-            timeout=settings.ocr_timeout_seconds,
+            **ocr_kwargs,
         )
     except Exception:
         log.exception("vision_transcribe_failed")

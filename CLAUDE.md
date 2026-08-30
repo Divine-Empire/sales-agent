@@ -561,11 +561,163 @@ Response shape stays backward compatible — `variants_detected`/`variants`
 are new fields; the single-model case's top-level `machine_id`/`name`/
 `characters_extracted` etc. are unchanged (the first/only variant's values).
 
-**Not yet done**: the existing "SOKKIA FIX-200 Series" machine/document
-already live in production (uploaded 2026-08-30, before this fix) still
-reflects the old collapsed profile — it needs a re-upload to split into
-separate FX-201/FX-202 machines under the new behavior; this hasn't been
-triggered yet.
+**Superseded same day**: the design above (one `machines` row per detected
+variant) was replaced a few hours later — see "Variants live under one
+machine" below — after the client clarified their own mental model is one
+machine with multiple types underneath it, not several separate machines.
+
+### GPT-5.6-terra: model switch + a variant-detection regression it caused (2026-08-30)
+
+`OPENAI_MODEL` switched from `gpt-4o` to `gpt-5.6-terra` (the balanced tier
+of OpenAI's GPT-5.6 family — chosen over the flagship `sol` tier for better
+latency/cost on a real-time chat path, and over the cheap `luna` tier to
+keep reasoning depth for document structuring). This needed real code
+changes, not just an env var flip, because GPT-5-family models are a
+genuinely different API shape:
+
+- **`temperature` is rejected outright** (400 Bad Request) on every
+  GPT-5-family model except gpt-5.1+ with `reasoning_effort="none"`.
+  `app/llm.py`'s `complete()` gained `_is_gpt5_family()` (a name-prefix
+  check, `^gpt-5([.\-]|$)`) and `_apply_model_sampling()`, which drops
+  `temperature` and adds `reasoning_effort` instead whenever the configured
+  model is GPT-5-family — a no-op for `gpt-4o` and anything else, so this
+  changes nothing unless `OPENAI_MODEL` is actually switched. New setting
+  `llm_reasoning_effort` (default `"low"`, favors the fast/short replies the
+  prompt already asks for).
+- **Tool calls (`tools=`) reject any `reasoning_effort` other than `"none"`**
+  on `/v1/chat/completions` for this family — found live via a real 400:
+  "Function tools with reasoning_effort are not supported for gpt-5.6-terra
+  ... set reasoning_effort to 'none'." This hits every tool-call caller in
+  this codebase (the agent's 3 tools, document-profile structuring,
+  lead-scoring analysis), so `_apply_model_sampling` forces
+  `reasoning_effort="none"` whenever `tools` is present in the request,
+  regardless of what was asked for — reasoning still happens, it just isn't
+  exposed as a separate effort dial for this call shape.
+- `transcribe_image()` (OCR) had its own hardcoded `temperature=0.0` call,
+  same fix applied there.
+- The Groq fallback path gets the same treatment defensively (keyed off
+  `settings.groq_model`, currently never GPT-5-shaped, but free to check).
+
+**A real regression this surfaced**: the multi-variant detection work above
+was built and verified against `gpt-4o`. Re-tested against `gpt-5.6-terra`,
+it consistently added a bogus THIRD variant entry named after the bare
+series ("Sokkia FX-200" / "Sokkia FX-200 Series") alongside the two real
+ones — content was just a restatement of "available models: FX-201 and
+FX-202," not a real model. Fixed two ways: `PROFILE_PROMPT` and
+`PROFILE_TOOL`'s schema now explicitly forbid a series-label entry, and
+`_drop_redundant_series_variant()` is a code-level backstop that detects a
+variant whose own code is a "round" number (e.g. "200") sharing a leading
+digit with two or more non-round sibling codes ("201", "202") and drops it
+— narrow enough that a genuine third real model (e.g. "FX-210", not round)
+is never touched. `_find_model_codes()` (the missed-variant retry check)
+got the same round-number exclusion, so it no longer manufactures a phantom
+"missed variant" out of the series name and triggers a pointless retry.
+Verified: 5/5 clean runs (exactly FX-201 + FX-202, no bogus third entry, no
+wasted retry) after both fixes, versus a bogus third entry appearing in
+every run beforehand.
+
+### Variants live under one machine, not separate machines (2026-08-30)
+
+The client's own mental model, stated directly: FX-201 and FX-202 are
+**types of one machine** ("Sokkia FX-200 Series"), not two separate
+machines that happen to be related. The same-day design above (one
+`machines` row per detected variant) matched a retrieval-safety goal but
+not the client's actual data model, so it was replaced within hours.
+
+`add_machine_from_document()` now always creates exactly **one** `machines`
+row (named after whatever was typed at upload) and **one** `machine_document`
+— `format_profile_markdown()` renders every detected variant as its own
+`### Type: {model_name}` sub-section (with `####` sub-headings for that
+variant's own 13 sections) nested inside the single document, instead of
+each variant getting a separate top-level `##` document. Retrieval safety
+is preserved a different way: `extract_codes()` already scans the full
+combined document text, so both "FX-201" and "FX-202" still end up in the
+one machine's `codes` payload list — a customer's exact-code question still
+gets an exact-match priority hit on the right chunk of the *same* document,
+it just no longer needs a separate `machine_id` to do it. Verified: uploading
+the real two-variant test document now produces exactly one `machines` row,
+one `machine_document` containing both `### Type:` sub-sections with
+distinct verbatim specs, and a `codes` list containing both `FX-201` and
+`FX-202`.
+
+### Missing-section enrichment via general model knowledge (2026-08-30)
+
+A source brochure/spec sheet routinely has no Price, Competitors,
+Objections, or FAQs section at all — a spec table answers "what are the
+numbers," not "why this over a competitor." The client explicitly chose to
+have these auto-filled from the model's own general category knowledge
+(NOT a live web search) rather than left blank or filled in by hand.
+
+`_enrich_missing_sections()` (`app/documents.py`) runs after structuring,
+one additional LLM call per variant, **only** for variant profiles that
+have at least one section from `_ENRICHABLE_SECTIONS` (price, competitors,
+advantages, limitations, common_objections, responses, faqs,
+upselling_opportunities) still null — a fully-covered profile costs nothing
+extra. Deliberately does NOT touch what_it_does/who_should_(not)_buy/
+features/benefits: those must stay grounded in the actual source document,
+and are usually already filled when the document has real content — letting
+general knowledge overwrite "the document doesn't say" with a plausible
+guess about a specific model's own behavior would defeat the whole
+never-invent-a-spec principle this codebase holds everywhere else.
+
+Every enriched section is prefixed with `_AI_ESTIMATE_PREFIX` —
+`"[AI estimate — not from the source document; verify before relying on
+it]\n"` — visible in the dashboard's document view/edit and in whatever RAG
+retrieves, so a rep (or the agent) can tell brochure-verified content from a
+general-knowledge starting point at a glance. The enrichment prompt itself
+is written to keep the model honest about the distinction: name real known
+competitor brands if genuinely known (never invented ones), give a category-
+level price range rather than a specific rupee figure claimed as this exact
+model's price, and leave a section null rather than force a guess with no
+genuine basis.
+
+**A real bug this caused, found and fixed the same pass**: `extract_codes()`
+runs on the full stored document text to build the `codes` payload list —
+an enriched Competitors section naming real rival products ("Leica
+TS16/TS20", "Trimble S9") had ITS OWN model-shaped codes picked up into
+THIS machine's `codes` list, so a customer asking about "TS16" (a Leica
+product, never ours) would have incorrectly exact-matched this machine's
+chunk. Fixed in `ingest_document()`: code extraction now runs on the
+document text with any paragraph starting with `_AI_ESTIMATE_PREFIX`
+stripped out first — the full enriched content still ships in the stored/
+RAG text either way, only the code-extraction input is narrowed.
+
+### Extraction/structuring was silently dropping real brochure content (2026-08-30)
+
+Comparing the actual FX-200 series PDF's raw extracted text against its
+structured dashboard output surfaced a real completeness gap distinct from
+the earlier verbatim-numbers fix: rich descriptive content that didn't
+neatly fit a spec-bullet shape was being dropped entirely — application
+write-ups ("Boundary and Cadastral Survey", "Topographic Survey" explaining
+what a use case is and how the product supports it), a named onboard
+software package's actual feature list (MAGNET Field's roading tools,
+surface staking, cut/fill indicators, etc.), a "Standard Package Components"
+accessories list, and a comparison callout table (this model's accuracy/
+range vs. a "Previous Model"). None of this is a bare numeric spec, so the
+model, left to its own judgment, treated it as not fitting Features and
+silently left it out — the client's explicit standing instruction is that
+if the source document has real data, it belongs in the knowledge base,
+whether or not it's phrased as a bullet-point spec.
+
+Fixed in `PROFILE_PROMPT`: a new paragraph states directly that content
+which doesn't neatly fit one section must still land somewhere (Features,
+Benefits, or What it does) rather than be dropped, and that a profile
+shorter than what the source document actually contains is exactly as bad
+a failure as inventing content that isn't there. `_FIELD_GUIDANCE` extended
+to `what_it_does` (include full application/use-case write-ups, not a
+one-line summary) and `benefits` (include what named features/use-cases
+mean for the buyer, drawing on comparison content) — previously only
+`features` had dedicated guidance. `max_output_tokens` for the structuring
+call raised 4000 → 8000, since a rich, detailed brochure genuinely needs
+more room per variant than a sparse spec sheet does.
+
+Verified against the real FX-200 series PDF text: Features per variant grew
+from ~250 chars (bare specs only) to 2000+ chars including the full
+Standard Package Components list, the MAGNET Field software feature list,
+and the accuracy/range comparison table — all present verbatim, correctly
+attributed per variant, with no invented content (confirmed by checking the
+output only ever restates numbers/lists actually present in the source
+text).
 
 ### Stable Qdrant point ids (fixed 2026-08-30, found while auditing the above)
 
