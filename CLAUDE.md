@@ -1240,6 +1240,47 @@ overriding a lead's category is a correction, not a permanent lock.
   timed out on both providers now succeeds in ~97s, correctly detecting
   all three real models (iX-1201, iX-601, iX-605) instead of falling back
   to raw text.
+- A fourth real transcript (2026-08-31, after the catalog grew to several
+  genuinely different survey machines — FX-200 series, iM-100, iM-60series)
+  surfaced two more gaps the earlier fixes didn't cover:
+
+  First, "COMPARE ACROSS MACHINES, NOT JUST WITHIN ONE" — the earlier
+  "MULTIPLE TYPES UNDER ONE MACHINE" rule only covered variants nested
+  under a single machine's document; it said nothing about the case where
+  RAG retrieval surfaces chunks from SEVERAL different machines that could
+  all plausibly fit the same request. A real conversation asked for a
+  boundary survey instrument (Raipur, 10 days) and got Sokkia FX-201
+  recommended directly, even though the catalog by then also had iM-100
+  and iM-60series machines that are equally "survey equipment" and could
+  fit just as well — with no comparison, no stated reason, and no
+  acknowledgment that other options existed. Added a rule extending the
+  same "don't default to whichever one you saw first" principle across
+  different machines, not just types within one: weigh what's actually
+  known about the need against what each retrieved machine is suited for,
+  and name the best fit with a brief reason — or ask the differentiating
+  question if genuinely unsure, same as within one machine.
+
+  Second, a specs request answered with a use-case description instead of
+  real numbers: "Mujhe specifications batao" got "Sokkia FX-201 boundary
+  survey ke liye useful hai kyunki..." — a repeat of what it's used FOR,
+  not the actual accuracy/range/battery figures already sitting in the
+  retrieved context. Root cause: the existing "keep replies short, don't
+  dump a spec sheet" style guidance was being over-applied to a message
+  that explicitly asked for the opposite. Added a rule making explicit
+  that a specs/technical-details request is a different question from
+  "tell me about it", and gets the real numbers (still no bullet-list
+  dump, still no unrequested price) — answering it with only a use-case
+  description is treated as the same category of mistake as not answering
+  at all.
+
+  Verified against the real pipeline with four different machines
+  (FX-201/202, iM-101, iM-62) all present in one turn's retrieved context:
+  2/3 runs on "Boundary" correctly named a DIFFERENT machine (iM-62,
+  described in-context as fitting boundary/construction work) rather than
+  defaulting to FX-201, the 1/3 run asked a differentiating question
+  instead of guessing; 3/3 runs on "Mujhe specifications batao" returned
+  the real accuracy/range/battery numbers rather than a repeated use-case
+  description.
 
 ## Conventions
 
