@@ -35,8 +35,17 @@ log = get_logger(__name__)
 VECTOR_SIZE = 1536
 DISTANCE = models.Distance.COSINE
 
-# Lives in data/, not docs/: the app reads this at ingestion time, so it is
-# operational data that must ship in the image — docs/ is gitignored.
+# Deliberately no longer shipped (removed 2026-08-30, at the client's
+# request) — this used to point at a bundled, pre-written catalog file
+# with hardcoded categories/prices (Total Stations, Bar Bending & Cutting
+# Machines, etc.) that `ingest()` below would load into Qdrant if ever run.
+# The client's own catalog should be the only source of truth the agent
+# draws from, not a compiled-once August 2026 public-listing snapshot
+# sitting alongside it. `ingest()`/`load_chunks()` are kept as a reusable
+# markdown-bulk-import path (this repo's convention: a `## `/`### `
+# heading-chunked file), but nothing calls them automatically, and no such
+# file ships in this repo anymore — point `path=` at your own file if you
+# ever need this path again.
 KNOWLEDGE_BASE = Path("data/knowledge_base.md")
 
 _client: AsyncQdrantClient | None = None

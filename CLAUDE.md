@@ -765,6 +765,74 @@ the next time they're re-ingested after a restart, which this fix now
 prevents going forward; no retroactive cleanup was needed since nothing had
 actually been re-ingested since the collection was last fully rebuilt.
 
+### Document structuring rebuilt on Pydantic models, not hand-rolled dicts (2026-08-30)
+
+`structure_product_profile()`'s whole pipeline (`app/documents.py`) used to
+pass a raw hand-written dict as the OpenAI tool-call schema and parse the
+response back with manual `json.loads` + `isinstance` checks — the schema
+and the parsing logic were two independently-maintained things that could
+silently drift apart, and a malformed field failed as a `KeyError` three
+functions later rather than at the parse boundary. Replaced with
+`ProductVariantProfile`/`ProductProfileResult` (`pydantic.BaseModel`): the
+13 sections are now real typed fields (each `str | None`, matching the
+existing "null means not covered, never invent" contract), the tool schema
+sent to OpenAI is generated FROM the model (`_pydantic_tool_schema`, via
+`model_json_schema()`), and the response is parsed straight back into the
+same model (`model_validate_json`) instead of a parallel hand-rolled path.
+`_enrich_missing_sections`'s per-call schema (only the sections actually
+missing for a given variant) is now a Pydantic model built on the fly with
+`pydantic.create_model` — same schema-generation/parsing path, no separate
+raw-dict tool definition to keep in sync by hand.
+
+Every function downstream (`_drop_redundant_series_variant`,
+`format_profile_markdown`, `add_machine_from_document`) now works with
+`ProductVariantProfile` objects and `profile.section_items()`/
+`profile.filled_count()` instead of dict keys and `len(dict) - 1` — a typo
+in a field name is now a static/attribute error, not a silently-absent
+dict key. `PROFILE_SECTION_LABELS` (the (field, display-label) pairing) is
+still one flat list, but it's now purely a rendering/prompt-building detail
+— `ProductVariantProfile`'s field definitions are the actual source of
+truth for what a section is and what its own guidance says, keeping that
+guidance next to the field it describes instead of in a separate
+`_FIELD_GUIDANCE` dict that had to be manually kept in sync by key name.
+
+**A real bug the refactor's own testing caught**: `_enrich_missing_sections`
+hardcoded `max_output_tokens=1200` regardless of how many sections were
+actually missing. A profile missing all 8 enrichable sections at once (a
+bare spec sheet with nothing beyond specs) genuinely needs more than 1200
+tokens to write a real paragraph for each — the response was silently
+truncated mid-JSON-string, `model_validate_json` correctly raised a
+`ValidationError` ("EOF while parsing a string"), and that error was being
+swallowed with no log line at all, so a fully-missing-sections profile
+looked like enrichment had run and found nothing to add, when it had
+actually failed outright. Fixed by scaling the token budget with how many
+sections are actually missing, and by logging the `ValidationError` case
+(`profile_enrichment_bad_json`, with `completion_tokens` so a future
+recurrence is diagnosable at a glance instead of invisible again.
+
+**A second real bug found in the same pass**: the AI-estimate-paragraph
+filter in `ingest_document()` (added when enriched Competitors content was
+found leaking rival products' model codes into this machine's `codes`
+list — see the entry above) used `.startswith()` to detect an AI-estimate
+paragraph, but `format_profile_markdown` always puts the `#### Label`
+heading on its own line immediately before the section text — so the
+`\n\n`-joined paragraph actually starts with the heading, not the prefix,
+and the `startswith` check silently matched nothing. The codes list kept
+leaking competitor codes despite the filter appearing to exist and having
+its own test coverage claim. Fixed by checking `in` the paragraph instead
+of `.startswith()`. Verified against real Qdrant: a document with an
+enriched "Leica TS16, Trimble S9" Competitors section now produces a codes
+list containing only this machine's own FX-200/FX-201/FX-202 codes, zero
+leaked competitor codes — confirmed both via direct string-level testing
+and a live end-to-end upload.
+
+Verified end-to-end after all three fixes: 5/5 clean multi-variant runs
+(FX-201 + FX-202, no bogus third entry, every enrichable section filled on
+every variant), 3/3 clean single-variant runs (no false split from a
+sibling model mentioned in passing), and a live Supabase/Qdrant upload
+producing the correct single machine row, one document, and a clean codes
+list.
+
 ### Cross-machine matching — enrich the RAG query with what's already known (2026-08-28)
 
 `rag.search()` was only ever given the customer's single current message.

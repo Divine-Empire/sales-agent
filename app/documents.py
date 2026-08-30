@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import re
 from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError, create_model
 
 from app import store
 from app.config import settings
@@ -199,13 +200,181 @@ def _extract_docx(data: bytes) -> str:
     return combined
 
 
-# The product-profile template (data/product_profile_template.md) as a tool
-# schema — one nullable string field per section, so the model can genuinely
+# The product-profile template (data/product_profile_template.md), as Pydantic
+# models — this is the single source of truth for the shape; the tool-call
+# JSON schema OpenAI sees is generated FROM these models (_pydantic_tool_schema),
+# and the LLM's response is parsed straight back into one (model_validate_json)
+# rather than hand-rolled dict/isinstance checks. That gets us three things
+# for free that the old raw-dict-schema version didn't have: a single place
+# that defines "what a profile looks like" (used for the schema, the parse,
+# and static typing everywhere else in this module), automatic validation
+# (a malformed field is a clean ValidationError, not a silent KeyError three
+# functions later), and IDE/type-checker support on every profile field.
+#
+# Every section is optional and defaults to None — the model can genuinely
 # omit what a source document doesn't cover rather than being forced to
-# invent something to fill every field. `null` here means "not in this
-# document", which is exactly the signal _format_profile_markdown needs to
+# invent something to fill every field. `None` here means "not in this
+# document", which is exactly the signal format_profile_markdown needs to
 # leave that section out rather than emit an empty heading.
-PROFILE_SECTIONS = [
+class ProductVariantProfile(BaseModel):
+    """One product/model's full rich profile (data/product_profile_template.md's
+    13-section shape) plus which specific model it describes."""
+
+    model_name: str = Field(
+        description=(
+            "This variant's own name/model code as the document gives it, e.g. "
+            "'Sokkia FX-201 Total Station' — not the generic series name."
+        )
+    )
+    what_it_does: str | None = Field(
+        default=None,
+        description=(
+            "What it does. Use null if the document genuinely does not cover this — never "
+            "invent content to fill a section. Include any application/use-case write-ups "
+            "the document gives (e.g. 'Boundary and Cadastral Survey', 'Topographic Survey' "
+            "sections explaining what the product is used for and how) — not just a one-line "
+            "functional summary. If the document spends a paragraph explaining a use case, "
+            "that content belongs here, in full."
+        ),
+    )
+    who_should_buy: str | None = Field(
+        default=None,
+        description=(
+            "Who should buy it. Use null if the document genuinely does not cover this — "
+            "never invent content to fill a section."
+        ),
+    )
+    who_should_not_buy: str | None = Field(
+        default=None,
+        description=(
+            "Who should NOT buy it. Use null if the document genuinely does not cover this — "
+            "never invent content to fill a section."
+        ),
+    )
+    features: str | None = Field(
+        default=None,
+        description=(
+            "Features. Use null if the document genuinely does not cover this — never invent "
+            "content to fill a section. List specs with their exact numbers/units as given in "
+            "the document (ranges, accuracy figures, weights, battery life, included "
+            "accessories, connectivity specs) — do not summarize a number into a generic "
+            "description. 'Reflectorless range: 0.3 to 800m' stays exactly that, never becomes "
+            "'reflectorless laser measurement'. If the document gives you ten specs, keep ten "
+            "specs. Also include named onboard software/feature packages (e.g. an onboard "
+            "field-software suite and what it does), standard package contents/included "
+            "accessories, and any named feature systems (e.g. a guide-light or target-locating "
+            "system) with their actual described behavior — not just their name."
+        ),
+    )
+    benefits: str | None = Field(
+        default=None,
+        description=(
+            "Benefits. Use null if the document genuinely does not cover this — never invent "
+            "content to fill a section. Include what named features/use-cases actually mean "
+            "for the buyer, drawing on any feature-explanation or comparison content in the "
+            "document (e.g. a comparison against a previous/other model's accuracy or range) — "
+            "do not compress a paragraph explaining a benefit into a single generic sentence "
+            "if the document gives more detail than that."
+        ),
+    )
+    price: str | None = Field(
+        default=None,
+        description=(
+            "Price. Use null if the document genuinely does not cover this — never invent "
+            "content to fill a section."
+        ),
+    )
+    competitors: str | None = Field(
+        default=None,
+        description=(
+            "Competitors. Use null if the document genuinely does not cover this — never "
+            "invent content to fill a section."
+        ),
+    )
+    advantages: str | None = Field(
+        default=None,
+        description=(
+            "Advantages. Use null if the document genuinely does not cover this — never "
+            "invent content to fill a section."
+        ),
+    )
+    limitations: str | None = Field(
+        default=None,
+        description=(
+            "Limitations. Use null if the document genuinely does not cover this — never "
+            "invent content to fill a section."
+        ),
+    )
+    common_objections: str | None = Field(
+        default=None,
+        description=(
+            "Common objections. Use null if the document genuinely does not cover this — "
+            "never invent content to fill a section."
+        ),
+    )
+    responses: str | None = Field(
+        default=None,
+        description=(
+            "Responses. Use null if the document genuinely does not cover this — never invent "
+            "content to fill a section."
+        ),
+    )
+    faqs: str | None = Field(
+        default=None,
+        description=(
+            "Frequently asked questions. Use null if the document genuinely does not cover "
+            "this — never invent content to fill a section."
+        ),
+    )
+    upselling_opportunities: str | None = Field(
+        default=None,
+        description=(
+            "Upselling opportunities. Use null if the document genuinely does not cover this "
+            "— never invent content to fill a section."
+        ),
+    )
+
+    def section_items(self) -> list[tuple[str, str]]:
+        """(label, text) for every section that's actually filled — the
+        iteration format_profile_markdown and the enrichment prompt both
+        want, without either needing to know the field list themselves."""
+        return [
+            (label, value)
+            for key, label in PROFILE_SECTION_LABELS
+            if (value := getattr(self, key)) is not None
+        ]
+
+    def filled_count(self) -> int:
+        return len(self.section_items())
+
+
+class ProductProfileResult(BaseModel):
+    """The full tool-call payload: one or more variant profiles from a single
+    uploaded document. Most documents describe one model and come back as a
+    single-item list; a document that genuinely gives separate models their
+    own specs comes back with more than one entry — see ProductVariantProfile
+    and structure_product_profile's docstring."""
+
+    variants: list[ProductVariantProfile] = Field(
+        description=(
+            "One entry per distinct model/variant the document actually describes — most "
+            "documents cover exactly one, so this will usually be a single-item array. Only "
+            "split into multiple entries when the document genuinely gives separate specs for "
+            "separate model numbers (e.g. a 'series' brochure with a spec table listing "
+            "different accuracy/range/price per model). Do not split a document that just "
+            "mentions related products in passing — only when it gives each one its own real "
+            "specs. Never add a separate entry for the bare series name itself (e.g. no extra "
+            "'FX-200' entry alongside real 'FX-201' and 'FX-202' entries) — the series name is "
+            "not itself a sellable model."
+        )
+    )
+
+
+# (field_name, display_label) for every section in ProductVariantProfile,
+# excluding model_name — the one place that pairing is spelled out, reused
+# by section_items(), format_profile_markdown, and the enrichment prompt so
+# none of them can drift out of sync with the model itself.
+PROFILE_SECTION_LABELS: list[tuple[str, str]] = [
     ("what_it_does", "What it does"),
     ("who_should_buy", "Who should buy it"),
     ("who_should_not_buy", "Who should NOT buy it"),
@@ -221,104 +390,29 @@ PROFILE_SECTIONS = [
     ("upselling_opportunities", "Upselling opportunities"),
 ]
 
-# Per-field guidance beyond the generic "use null if absent" rule. Only
-# `features` needs one today — found live that GPT-4o, left to its own
-# summarizing instinct, turned "Reflectorless range: 0.3 to 800m, Accuracy
-# (ISO 17123-3:2001): 2\", Battery BDC72 ~20 hours, Weight ~5.7kg" into a
-# generic bullet like "Reflectorless laser measurement" with every number
-# dropped — exactly the spec a customer asks about by name, and exactly
-# what the agent needs verbatim to answer "what's the reflectorless range"
-# without falling back to "I'll check with the team" on a spec that was
-# genuinely right there in the source document.
-_FIELD_GUIDANCE = {
-    "what_it_does": (
-        " Include any application/use-case write-ups the document gives (e.g. "
-        "'Boundary and Cadastral Survey', 'Topographic Survey' sections explaining what the "
-        "product is used for and how) — not just a one-line functional summary. If the "
-        "document spends a paragraph explaining a use case, that content belongs here, in full."
-    ),
-    "features": (
-        " List specs with their exact numbers/units as given in the document "
-        "(ranges, accuracy figures, weights, battery life, included accessories, "
-        "connectivity specs) — do not summarize a number into a generic "
-        "description. 'Reflectorless range: 0.3 to 800m' stays exactly that, "
-        "never becomes 'reflectorless laser measurement'. If the document gives "
-        "you ten specs, keep ten specs. Also include named onboard software/feature packages "
-        "(e.g. an onboard field-software suite and what it does), standard package contents/"
-        "included accessories, and any named feature systems (e.g. a guide-light or "
-        "target-locating system) with their actual described behavior — not just their name."
-    ),
-    "benefits": (
-        " Include what named features/use-cases actually mean for the buyer, drawing on any "
-        "feature-explanation or comparison content in the document (e.g. a comparison against "
-        "a previous/other model's accuracy or range) — do not compress a paragraph explaining "
-        "a benefit into a single generic sentence if the document gives more detail than that."
-    ),
-}
 
-# A single "properties" shape for one variant's profile, reused both for the
-# single-variant case and inside the variants array below — one document can
-# genuinely describe several distinct models (e.g. a Sokkia "FX-200 series"
-# brochure covering both FX-201 and FX-202 with different accuracy/range
-# specs each). Found live: uploading that brochure under one generic machine
-# name produced one generic profile that silently dropped which spec
-# belonged to which model — the FX-201/FX-202 accuracy difference the source
-# document itself calls out ("FX-201 is the higher-precision 1\" variant")
-# never made it into the extracted profile at all.
-_VARIANT_PROPERTIES = {
-    key: {
-        "type": ["string", "null"],
-        "description": (
-            f"{label}. Use null if the document genuinely does not cover this — "
-            "never invent content to fill a section." + _FIELD_GUIDANCE.get(key, "")
-        ),
+def _pydantic_tool_schema(model: type[BaseModel], name: str, description: str) -> dict[str, Any]:
+    """An OpenAI tool-call schema generated FROM a Pydantic model's own
+    json schema, rather than hand-written — keeps the schema the LLM sees
+    and the model used to parse its answer permanently in sync, since
+    they're now literally the same source. `ref_template`/inlining nested
+    $defs isn't needed here since these models are one flat level deep, but
+    model_json_schema()'s `additionalProperties` default (unset) is
+    explicitly pinned to False, which OpenAI's function-calling schema
+    expects for strict validation."""
+    schema = model.model_json_schema()
+    schema["additionalProperties"] = False
+    return {
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": schema},
     }
-    for key, label in PROFILE_SECTIONS
-}
 
-PROFILE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "record_product_profile",
-        "description": ("Record one product profile per distinct model the document describes."),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "variants": {
-                    "type": "array",
-                    "description": (
-                        "One entry per distinct model/variant the document actually "
-                        "describes — most documents cover exactly one, so this will usually "
-                        "be a single-item array. Only split into multiple entries when the "
-                        "document genuinely gives separate specs for separate model numbers "
-                        "(e.g. a 'series' brochure with a spec table listing different "
-                        "accuracy/range/price per model). Do not split a document that just "
-                        "mentions related products in passing — only when it gives each one "
-                        "its own real specs. Never add a separate entry for the bare series "
-                        "name itself (e.g. no extra 'FX-200' entry alongside real 'FX-201' and "
-                        "'FX-202' entries) — the series name is not itself a sellable model."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "model_name": {
-                                "type": "string",
-                                "description": (
-                                    "This variant's own name/model code as the document gives "
-                                    "it, e.g. 'Sokkia FX-201 Total Station' — not the generic "
-                                    "series name."
-                                ),
-                            },
-                            **_VARIANT_PROPERTIES,
-                        },
-                        "required": ["model_name", *(key for key, _ in PROFILE_SECTIONS)],
-                    },
-                },
-            },
-            "required": ["variants"],
-        },
-    },
-}
+
+PROFILE_TOOL = _pydantic_tool_schema(
+    ProductProfileResult,
+    "record_product_profile",
+    "Record one product profile per distinct model the document describes.",
+)
 
 PROFILE_PROMPT = """You turn a raw product document (a brochure, spec sheet, or manual) into a
 structured profile for a sales agent to use later.
@@ -454,7 +548,9 @@ def _find_model_codes(text: str, family_prefix: str | None) -> set[str]:
     return result
 
 
-def _drop_redundant_series_variant(profiles: list[dict[str, str]]) -> list[dict[str, str]]:
+def _drop_redundant_series_variant(
+    profiles: list[ProductVariantProfile],
+) -> list[ProductVariantProfile]:
     """Drop a bogus generic "series" entry the model sometimes adds alongside
     the real numbered variants it already extracted correctly.
 
@@ -485,8 +581,8 @@ def _drop_redundant_series_variant(profiles: list[dict[str, str]]) -> list[dict[
             return None
         return match.group(1).upper(), match.group(2)
 
-    parsed = [parts_of(p.get("model_name", "")) for p in profiles]
-    keep: list[dict[str, str]] = []
+    parsed = [parts_of(p.model_name) for p in profiles]
+    keep: list[ProductVariantProfile] = []
     for i, profile in enumerate(profiles):
         this = parsed[i]
         if this is None:
@@ -513,11 +609,23 @@ def _drop_redundant_series_variant(profiles: list[dict[str, str]]) -> list[dict[
         if is_round and siblings >= 2:
             log.info(
                 "profile_structuring_dropped_series_label",
-                extra={"model_name": profile.get("model_name")},
+                extra={"model_name": profile.model_name},
             )
             continue
         keep.append(profile)
     return keep or profiles
+
+
+def _clean_variant(profile: ProductVariantProfile) -> ProductVariantProfile:
+    """Strip whitespace and collapse an empty/whitespace-only section to
+    None — a section the model returns as "" is functionally the same as
+    omitting it, but would otherwise survive as a "filled" section (an
+    empty string is truthy-adjacent enough to slip past a careless check)."""
+    updates: dict[str, Any] = {"model_name": profile.model_name.strip()}
+    for key, _ in PROFILE_SECTION_LABELS:
+        value = getattr(profile, key)
+        updates[key] = value.strip() if isinstance(value, str) and value.strip() else None
+    return profile.model_copy(update=updates)
 
 
 async def _structure_profile_call(
@@ -525,7 +633,7 @@ async def _structure_profile_call(
     machine_name: str,
     conversation_id: str | None,
     extra_instruction: str = "",
-) -> list[dict[str, str]] | None:
+) -> list[ProductVariantProfile] | None:
     """One structuring completion call — returns parsed variant profiles or
     None on any failure. Separated from structure_product_profile so a retry
     with a stronger nudge can reuse the same parsing/validation logic."""
@@ -557,41 +665,23 @@ async def _structure_profile_call(
         return None
 
     try:
-        data = json.loads(response.tool_calls[0].function.arguments)
-    except json.JSONDecodeError:
+        result = ProductProfileResult.model_validate_json(response.tool_calls[0].function.arguments)
+    except ValidationError:
         log.warning("profile_structuring_bad_json", extra={"machine": machine_name})
         return None
-    if not isinstance(data, dict):
-        return None
 
-    raw_variants = data.get("variants")
-    if not isinstance(raw_variants, list) or not raw_variants:
+    profiles = [_clean_variant(v) for v in result.variants if v.model_name.strip()]
+    profiles = [p for p in profiles if p.filled_count() > 0]
+    if not profiles:
         log.warning("profile_structuring_no_variants", extra={"machine": machine_name})
         return None
-
-    profiles: list[dict[str, str]] = []
-    for entry in raw_variants:
-        if not isinstance(entry, dict):
-            continue
-        model_name = entry.get("model_name")
-        if not isinstance(model_name, str) or not model_name.strip():
-            continue
-        profile = {
-            key: value.strip()
-            for key, _ in PROFILE_SECTIONS
-            if isinstance(value := entry.get(key), str) and value.strip()
-        }
-        if not profile:
-            continue
-        profile["model_name"] = model_name.strip()
-        profiles.append(profile)
 
     return _drop_redundant_series_variant(profiles) or None
 
 
 async def structure_product_profile(
     raw_text: str, machine_name: str, conversation_id: str | None = None
-) -> list[dict[str, str]] | None:
+) -> list[ProductVariantProfile] | None:
     """Turn raw extracted document text into one or more rich product-profile
     shapes (data/product_profile_template.md) via one LLM call (plus a
     conditional second call — see below).
@@ -620,12 +710,12 @@ async def structure_product_profile(
     (partial but non-empty) result is still used — this only ever costs one
     extra completion call, and it only fires on the failure case.
 
-    Each list entry is a dict of {"model_name": str, section_key: text, ...}
-    with only the sections that entry's source material actually supported —
-    a section the model left null is simply absent, never filled with
-    placeholder text. Returns None on any failure (LLM unavailable,
-    malformed tool call), so the caller can fall back to ingesting the raw
-    text unchanged rather than losing the upload entirely.
+    Each list entry is a ProductVariantProfile with only the sections that
+    entry's source material actually supported filled in — a section the
+    model left null is simply None, never a placeholder string. Returns
+    None on any failure (LLM unavailable, malformed tool call, a response
+    that fails Pydantic validation), so the caller can fall back to
+    ingesting the raw text unchanged rather than losing the upload entirely.
     """
     profiles = await _structure_profile_call(raw_text, machine_name, conversation_id)
     if profiles is None:
@@ -633,9 +723,7 @@ async def structure_product_profile(
 
     family_prefix = _model_family_prefix(machine_name)
     source_codes = _find_model_codes(raw_text, family_prefix)
-    found_codes = {
-        c for p in profiles for c in _find_model_codes(p.get("model_name", ""), family_prefix)
-    }
+    found_codes = {c for p in profiles for c in _find_model_codes(p.model_name, family_prefix)}
     missed_codes = source_codes - found_codes
 
     if missed_codes and len(profiles) < len(source_codes):
@@ -665,7 +753,7 @@ async def structure_product_profile(
         extra={
             "machine": machine_name,
             "variant_count": len(profiles),
-            "sections_filled": sum(len(p) - 1 for p in profiles),
+            "sections_filled": sum(p.filled_count() for p in profiles),
         },
     )
     profiles = await _enrich_missing_sections(profiles, machine_name, conversation_id)
@@ -724,28 +812,50 @@ your answer relevant, but do not contradict it):
 Missing sections to fill: {missing_keys}"""
 
 
+_SECTION_LABEL_BY_KEY = dict(PROFILE_SECTION_LABELS)
+
+
+def _enrichment_model(missing_keys: list[str]) -> type[BaseModel]:
+    """A Pydantic model with exactly the missing sections as fields, built on
+    the fly via pydantic.create_model — the LLM is only ever asked for what's
+    actually absent, never re-asked to (or able to) overwrite a section the
+    source document already filled. Every field is required-but-nullable
+    (str | None with no default) so the model must make an explicit null/
+    string choice for each one rather than silently omitting a key."""
+    fields = {
+        key: (
+            str | None,
+            Field(
+                description=(
+                    f"{_SECTION_LABEL_BY_KEY[key]} — general category knowledge only, "
+                    "null if you don't have any genuine basis for one."
+                )
+            ),
+        )
+        for key in missing_keys
+    }
+    return create_model("SectionEnrichment", **fields)  # type: ignore[call-overload]
+
+
 async def _enrich_missing_sections(
-    profiles: list[dict[str, str]], machine_name: str, conversation_id: str | None
-) -> list[dict[str, str]]:
+    profiles: list[ProductVariantProfile], machine_name: str, conversation_id: str | None
+) -> list[ProductVariantProfile]:
     """Fill in sections a source document didn't cover using the model's own
     general category knowledge — explicitly labeled as such, never presented
     as brochure-verified fact. Only touches _ENRICHABLE_SECTIONS, and only
     when at least one of them is actually missing; a profile with everything
     already filled costs nothing extra. Failures here are non-fatal — the
     caller already has a perfectly good (if sparser) profile without this."""
-    enriched: list[dict[str, str]] = []
+    enriched: list[ProductVariantProfile] = []
     for profile in profiles:
-        missing = [k for k in _ENRICHABLE_SECTIONS if not profile.get(k)]
+        missing = [k for k in _ENRICHABLE_SECTIONS if getattr(profile, k) is None]
         if not missing:
             enriched.append(profile)
             continue
 
-        known_context = "\n".join(
-            f"{label}: {profile[key]}"
-            for key, label in PROFILE_SECTIONS
-            if key != "model_name" and profile.get(key)
-        )
-        variant_label = profile.get("model_name", machine_name)
+        known_context = "\n".join(f"{label}: {text}" for label, text in profile.section_items())
+        variant_label = profile.model_name or machine_name
+        enrichment_model = _enrichment_model(missing)
         try:
             response = await complete(
                 [
@@ -760,35 +870,21 @@ async def _enrich_missing_sections(
                     },
                 ],
                 tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "record_enrichment",
-                            "description": (
-                                "Record general-knowledge estimates for the missing sections only."
-                            ),
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    key: {
-                                        "type": ["string", "null"],
-                                        "description": (
-                                            f"{label} — general category knowledge only, "
-                                            "null if you don't have any genuine basis for one."
-                                        ),
-                                    }
-                                    for key in missing
-                                    for _, label in [
-                                        next(s for s in PROFILE_SECTIONS if s[0] == key)
-                                    ]
-                                },
-                                "required": missing,
-                            },
-                        },
-                    }
+                    _pydantic_tool_schema(
+                        enrichment_model,
+                        "record_enrichment",
+                        "Record general-knowledge estimates for the missing sections only.",
+                    )
                 ],
                 temperature=0.2,
-                max_output_tokens=1200,
+                # Up to 8 enrichable sections can be missing at once (a bare
+                # spec sheet with nothing beyond specs), each wanting a real
+                # paragraph — found live that 1200 tokens truncated the JSON
+                # mid-string on exactly that case (8/8 missing), which
+                # produced a clean ValidationError ("EOF while parsing a
+                # string") that was being silently swallowed below, so the
+                # enrichment looked like it ran but nothing was ever filled.
+                max_output_tokens=1200 * max(1, len(missing) // 2),
                 conversation_id=conversation_id,
             )
         except LLMUnavailableError:
@@ -800,34 +896,43 @@ async def _enrich_missing_sections(
             enriched.append(profile)
             continue
         try:
-            data = json.loads(response.tool_calls[0].function.arguments)
-        except json.JSONDecodeError:
-            enriched.append(profile)
-            continue
-        if not isinstance(data, dict):
+            result = enrichment_model.model_validate_json(response.tool_calls[0].function.arguments)
+        except ValidationError as exc:
+            # Not just non-fatal noise: a truncated/malformed tool-call
+            # response here previously vanished with zero trace (see the
+            # max_output_tokens comment above) — log it so a real recurrence
+            # is visible instead of silently looking like "nothing to enrich".
+            log.warning(
+                "profile_enrichment_bad_json",
+                extra={
+                    "machine": variant_label,
+                    "missing": len(missing),
+                    "completion_tokens": response.completion_tokens,
+                    "error": str(exc)[:200],
+                },
+            )
             enriched.append(profile)
             continue
 
-        filled = 0
+        updates: dict[str, Any] = {}
         for key in missing:
-            value = data.get(key)
+            value = getattr(result, key)
             if isinstance(value, str) and value.strip():
-                profile[key] = _AI_ESTIMATE_PREFIX + value.strip()
-                filled += 1
+                updates[key] = _AI_ESTIMATE_PREFIX + value.strip()
         log.info(
             "profile_enriched",
-            extra={"machine": variant_label, "missing": len(missing), "filled": filled},
+            extra={"machine": variant_label, "missing": len(missing), "filled": len(updates)},
         )
-        enriched.append(profile)
+        enriched.append(profile.model_copy(update=updates) if updates else profile)
     return enriched
 
 
 def format_profile_markdown(
-    profile: dict[str, str] | list[dict[str, str]], machine_name: str
+    profile: ProductVariantProfile | list[ProductVariantProfile], machine_name: str
 ) -> str:
     """Render structured profile(s) as `##`/`###` markdown — the same shape
-    `data/knowledge_base.md` uses, so chunk_text's paragraph/heading-based
-    splitting handles it with no changes.
+    data/product_profile_template.md uses, so chunk_text's paragraph/
+    heading-based splitting handles it with no changes.
 
     Accepts either a single variant's profile (one machine, one profile —
     the ordinary case) or a list of variant profiles for a SINGLE machine
@@ -837,34 +942,26 @@ def format_profile_markdown(
     variants render as `### Type: {model_name}` sub-sections nested under
     one `## {machine_name}` heading rather than as separate documents.
     """
-    if isinstance(profile, dict):
-        return _format_single_profile_markdown(profile, machine_name, heading_level="##")
+    if isinstance(profile, ProductVariantProfile):
+        return _format_single_profile_markdown(profile, heading_level="##")
 
     lines = [f"## {machine_name}", ""]
     for variant in profile:
-        variant_name = variant.get("model_name", machine_name)
-        lines.append(f"### Type: {variant_name}")
+        lines.append(f"### Type: {variant.model_name}")
         lines.append("")
-        lines.append(_format_single_profile_markdown(variant, variant_name, heading_level="####"))
+        lines.append(_format_single_profile_markdown(variant, heading_level="####"))
         lines.append("")
     return "\n".join(lines).strip()
 
 
-def _format_single_profile_markdown(
-    profile: dict[str, str], heading_title: str, *, heading_level: str
-) -> str:
+def _format_single_profile_markdown(profile: ProductVariantProfile, *, heading_level: str) -> str:
     """One profile's sections at the given heading depth — the shared
     renderer format_profile_markdown uses for both the single-variant case
     (### sections under a ## title) and each variant nested inside a
     multi-variant machine document (#### sections under a ### Type: title)."""
     sub_level = heading_level + "#"
     lines = []
-    for key, label in PROFILE_SECTIONS:
-        if key == "model_name":
-            continue
-        text = profile.get(key)
-        if not text:
-            continue
+    for label, text in profile.section_items():
         lines.append(f"{sub_level} {label}")
         lines.append(text)
         lines.append("")
@@ -956,11 +1053,14 @@ async def ingest_document(
     # picked up into THIS machine's `codes` list, so a customer asking about
     # "TS16" (a Leica product, never ours) would incorrectly exact-match this
     # machine's chunk. The stored/RAG text keeps the full enrichment content
-    # either way — only the code-extraction input is narrowed.
+    # either way — only the code-extraction input is narrowed. Checked with
+    # `in`, not `.startswith()`: format_profile_markdown puts a "#### Label"
+    # heading on its own line immediately before the section's text, so the
+    # marker is never the first thing in the \n\n-joined paragraph — a
+    # startswith check silently missed every real case and this codes list
+    # kept leaking competitor codes despite the filter appearing to exist.
     codes_source = "\n\n".join(
-        para
-        for para in text.split("\n\n")
-        if not para.lstrip().startswith(_AI_ESTIMATE_PREFIX.strip())
+        para for para in text.split("\n\n") if _AI_ESTIMATE_PREFIX.strip() not in para
     )
     codes = extract_codes(codes_source)
     if machine_code:
@@ -1246,11 +1346,11 @@ async def add_machine_from_document(
     elif len(profiles) == 1:
         stored_text = format_profile_markdown(profiles[0], name)
         variants_detected = 1
-        sections_filled = len(profiles[0]) - 1
+        sections_filled = profiles[0].filled_count()
     else:
         stored_text = format_profile_markdown(profiles, name)
         variants_detected = len(profiles)
-        sections_filled = sum(len(p) - 1 for p in profiles)
+        sections_filled = sum(p.filled_count() for p in profiles)
 
     await store.save_machine_document(
         machine_id=machine_id,
@@ -1276,9 +1376,7 @@ async def add_machine_from_document(
         "profile_sections_filled": sections_filled,
         "variants_detected": variants_detected,
         "variant_names": (
-            [p.get("model_name", name) for p in profiles]
-            if profiles and variants_detected > 1
-            else []
+            [p.model_name for p in profiles] if profiles and variants_detected > 1 else []
         ),
         **result,
     }
