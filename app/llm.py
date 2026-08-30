@@ -147,6 +147,7 @@ async def complete(
     temperature: float | None = None,
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
+    timeout_seconds: float | None = None,
     conversation_id: str | None = None,
 ) -> LLMResponse:
     """Run a chat completion, falling back to Groq on retryable failures.
@@ -159,6 +160,18 @@ async def complete(
     slower/more-careful (document structuring, lead scoring) can ask for
     more effort than the chat-reply default, without every caller needing
     to know or care whether the configured model is GPT-5-family at all.
+
+    `timeout_seconds` overrides the client-level default (settings.
+    llm_timeout_seconds, 30s — sized for a normal short chat reply). Found
+    live: a real multi-model spec-sheet document structuring call, asking
+    for up to 8000 output tokens, genuinely took ~35s and hit the 30s
+    default, raising APITimeoutError on the primary — which then fell
+    through to Groq, which failed its own tokens-per-minute limit on the
+    same large request, so the whole structuring call failed with both
+    providers exhausted even though OpenAI would have succeeded given a
+    little more time. A caller doing something structurally slower than a
+    chat reply (document structuring) should ask for a longer budget here
+    rather than let a real success get timed out into a false failure.
     """
     temperature = settings.llm_temperature if temperature is None else temperature
     kwargs: dict[str, Any] = {
@@ -173,6 +186,8 @@ async def complete(
             max_output_tokens if max_output_tokens is not None else settings.llm_max_output_tokens
         ),
     }
+    if timeout_seconds is not None:
+        kwargs["timeout"] = timeout_seconds
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"

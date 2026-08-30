@@ -1219,6 +1219,27 @@ overriding a lead's category is a correction, not a permanent lock.
   the following turn, rather than drifting to a second name) — a stricter
   and more consistent outcome than the original transcript's three
   different names in three turns.
+- Structuring a dense multi-model spec sheet (a document comparing three
+  distinct models, e.g. "iX-1201, iX-601, iX-605" in one brochure) could
+  fail entirely even with a working OpenAI key and enough quota (2026-08-30,
+  found while investigating two real production uploads — iM-100 and iX —
+  that came back with unformatted raw text instead of a structured
+  profile). Root cause was `app/llm.py`'s client-level 30s timeout, sized
+  for a short chat reply: a real structuring call asking for up to 8000
+  output tokens genuinely took ~35-97s to complete depending on how many
+  variants and retries were needed, which raised `APITimeoutError` on the
+  primary well before OpenAI actually finished — the call then fell
+  through to the Groq fallback, which failed too (the same large request
+  exceeded Groq's free-tier tokens-per-minute limit), so a call that would
+  have succeeded on OpenAI given more time failed on both providers and
+  silently triggered `add_machine_from_document`'s raw-text fallback.
+  `complete()` gained a `timeout_seconds` override (the client-level
+  default stays 30s for ordinary chat replies); `_structure_profile_call`
+  now asks for 90s and `_enrich_missing_sections` for 60s. Verified against
+  the real saved iX document text: the exact same call that previously
+  timed out on both providers now succeeds in ~97s, correctly detecting
+  all three real models (iX-1201, iX-601, iX-605) instead of falling back
+  to raw text.
 
 ## Conventions
 

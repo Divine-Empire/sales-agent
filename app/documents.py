@@ -654,6 +654,16 @@ async def _structure_profile_call(
             # sparse spec sheet does; 4000 was found live to truncate a real
             # detailed brochure's content before it fit.
             max_output_tokens=8000,
+            # The default 30s client timeout is sized for a short chat reply
+            # — found live: a real dense multi-model spec sheet (comparing
+            # three models in one document) took ~35s to generate an 8000-
+            # token structured response and hit APITimeoutError on the
+            # primary, which then fell through to Groq and failed there too
+            # (the same large request blew Groq's tokens-per-minute limit) —
+            # a real, eventually-successful OpenAI response was thrown away
+            # as a false failure purely because of a timeout sized for the
+            # wrong kind of call.
+            timeout_seconds=90.0,
             conversation_id=conversation_id,
         )
     except LLMUnavailableError:
@@ -885,6 +895,12 @@ async def _enrich_missing_sections(
                 # string") that was being silently swallowed below, so the
                 # enrichment looked like it ran but nothing was ever filled.
                 max_output_tokens=1200 * max(1, len(missing) // 2),
+                # Same reasoning as structure_product_profile's own
+                # timeout_seconds override — the largest case here (8
+                # missing sections, ~4800 tokens) is comfortably inside 30s
+                # in practice, but there's no upside to risking the same
+                # false-timeout failure this scales toward as it grows.
+                timeout_seconds=60.0,
                 conversation_id=conversation_id,
             )
         except LLMUnavailableError:
