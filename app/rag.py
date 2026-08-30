@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 
 from qdrant_client import AsyncQdrantClient, models
 
@@ -291,6 +292,12 @@ def is_smalltalk(query: str) -> bool:
     return normalised in _SMALLTALK or normalised.rstrip("?.") in _SMALLTALK
 
 
+# Sections most likely to hold the numbers a code-specific/comparison
+# question actually wants — used only to prefer which chunk represents a
+# given code when several chunks share it, never to exclude the others.
+_PREFERRED_SECTION_MARKERS = ("Features", "What it does", "Price")
+
+
 async def _exact_code_matches(
     client: AsyncQdrantClient, query: str, conversation_id: str | None
 ) -> list[RetrievedChunk]:
@@ -306,6 +313,18 @@ async def _exact_code_matches(
     weakest exactly where a customer is most precise — typing an exact model
     number — so codes extracted from the customer's OWN message get an exact
     payload match as a supplement, not a replacement, for the vector search.
+
+    A multi-variant document (one machine, several "### Type: X" sections —
+    see documents.chunk_text) can have TEN OR MORE chunks sharing the same
+    code (every section of that variant's profile), so a flat `limit` here
+    silently starved this of real signal: a "FX-201 vs FX-202" comparison
+    with only `len(codes) * 2` slots filled could — and did — come back with
+    4 chunks that were all incidentally FX-202, with FX-201 crowded out
+    entirely by scroll() result ordering that has no relevance ranking of
+    its own. Fetches generously per code instead, and prefers each code's
+    own Features/What-it-does/Price chunk (where a comparison's real
+    numbers actually live) over whichever chunk scroll() happened to return
+    first — while still keeping every code represented, not just one.
     """
     codes = extract_codes(query)
     if not codes:
@@ -313,13 +332,15 @@ async def _exact_code_matches(
     try:
         # A pure payload filter, no vector involved — scroll(), not
         # query_points(), since there is nothing to rank by similarity here;
-        # a code either matches or it doesn't.
+        # a code either matches or it doesn't. Fetched generously per code
+        # (not just len(codes)*2 total) since one code can legitimately
+        # cover many chunks in a multi-variant document.
         points, _ = await client.scroll(
             collection_name=settings.qdrant_collection,
             scroll_filter=models.Filter(
                 must=[models.FieldCondition(key="codes", match=models.MatchAny(any=codes))]
             ),
-            limit=len(codes) * 2,
+            limit=max(len(codes) * 10, 20),
             with_payload=True,
         )
     except Exception:
@@ -327,6 +348,41 @@ async def _exact_code_matches(
             "rag_code_match_failed", extra={"conversation_id": conversation_id, "codes": codes}
         )
         return []
+
+    # Group by which of the query's codes each point actually carries (a
+    # point can match more than one code — e.g. a shared/series-level
+    # chunk — and stays available to every code it matches), then keep each
+    # code's own best-scoring chunk first, followed by the rest in
+    # scroll()'s own order — so every code gets real representation instead
+    # of losing a coin-flip to whichever chunk scroll() listed first.
+    by_code: dict[str, list[Any]] = {c: [] for c in codes}
+    for point in points:
+        if not point.payload:
+            continue
+        point_codes = set(point.payload.get("codes") or [])
+        for code in codes:
+            if code in point_codes:
+                by_code[code].append(point)
+
+    def preferred_first(pts: list[Any]) -> list[Any]:
+        text_of = lambda p: p.payload.get("text", "")  # noqa: E731
+        preferred = [p for p in pts if any(m in text_of(p) for m in _PREFERRED_SECTION_MARKERS)]
+        rest = [p for p in pts if p not in preferred]
+        return preferred + rest
+
+    ordered_points: list[Any] = []
+    seen_ids = set()
+    # Round-robin across codes so, with a fixed downstream cap, every code
+    # contributes before any single code's remaining chunks pad out the list.
+    per_code_ordered = {code: preferred_first(pts) for code, pts in by_code.items()}
+    max_len = max((len(pts) for pts in per_code_ordered.values()), default=0)
+    for i in range(max_len):
+        for code in codes:
+            pts = per_code_ordered.get(code, [])
+            if i < len(pts) and pts[i].id not in seen_ids:
+                ordered_points.append(pts[i])
+                seen_ids.add(pts[i].id)
+
     return [
         RetrievedChunk(
             text=p.payload.get("text", ""),
@@ -334,7 +390,7 @@ async def _exact_code_matches(
             machine_code=(p.payload.get("codes") or [None])[0],
             category=p.payload.get("category"),
         )
-        for p in points
+        for p in ordered_points
         if p.payload
     ]
 

@@ -1327,6 +1327,110 @@ overriding a lead's category is a correction, not a permanent lock.
   production, not the bare customer message, or a real fix can look like
   it didn't work.
 
+### Real-human-style live testing surfaced a chunking bug the prompt fixes couldn't reach (2026-08-31)
+
+At the user's explicit request, this session tested the deployed agent by
+calling `app.agent.handle_message` directly (a dedicated test
+`channel_user_id`, real production Supabase/Qdrant/OpenAI, no Telegram
+involved) as a real customer would, turn by turn, fixing whatever broke.
+Two real bugs surfaced this way, both about *retrieval*, not the prompt —
+confirming a pattern worth remembering: once the prompt-level behavior is
+right, the next class of bug lives in what RAG actually hands the model,
+which prompt-only testing never exercises.
+
+**Bug 1 — `save_lead` occasionally misses the turn it should fire on.**
+A test conversation gave name+company in one message; `save_lead` wasn't
+called that turn, but WAS called after the very next message (timeline
+info). Root cause is almost certainly the same "prompt instruction is a
+strong nudge, never a hard guarantee" pattern seen elsewhere in this
+codebase, not a new bug — but there is a genuine safety net already in
+place that this session hadn't previously connected: `intelligence.analyse()`
+independently re-derives `customer_name`/`company_name` (and everything
+else `save_lead` captures) from the full conversation history on its own
+async pass, so even a fully-missed `save_lead` call gets recovered once
+that job runs (verified live: manually re-running `analyse()` after
+deleting the summary row recovered the lead correctly, scored hot). This
+is not a fix — the miss itself is still worth reducing — but it means the
+actual customer-facing risk is delayed lead visibility, not a permanently
+lost lead. Not yet addressed with a code-level fix in this session; flagged
+as a candidate for one if it keeps recurring in real traffic.
+
+**Bug 2 — real, serious chunking bug: a multi-variant document's per-variant
+codes could get separated from that variant's own numbers.** Testing "FX-201
+aur FX-202 mein kya farak hai" against the live agent got "not available,
+checking with the team" despite both models' real specs having been
+ingested. Root cause, found by inspecting the actual Qdrant payload for
+every retrieval candidate (not just the final reply):
+
+- `chunk_text()`'s `codes` payload used to be computed ONCE from the
+  whole document and applied to every chunk — meaning every chunk of a
+  multi-variant document carried BOTH FX-201's and FX-202's codes, so
+  `_exact_code_matches` (a payload filter, not a similarity search — see
+  its own docstring) had zero ability to tell a chunk that was actually
+  about FX-202 from one that only happened to be in the same document.
+  Fixed: `codes` is now computed per-chunk, from that chunk's own text
+  plus the machine's base code — giving exact-match its real
+  discriminating power back. (The `_AI_ESTIMATE_PREFIX` competitor-code
+  filter, added earlier for the whole-document codes list, had to be
+  extracted into a shared helper, `_extract_codes_excluding_ai_estimate`,
+  and applied per-chunk too — it was silently not running on per-chunk
+  text at all when this bug was first fixed, which is exactly the kind of
+  regression a full re-test (not just "does search return more chunks
+  now") was needed to catch.)
+- That fix alone still weakened for a genuinely long section: `chunk_text`
+  splits on paragraph (`\n\n`) boundaries, and a `### Type: X` heading is
+  often its own short paragraph immediately followed by that variant's
+  actual content (e.g. a long bulleted Features list) as a SEPARATE
+  paragraph — one that, on its own, can exceed `CHUNK_CHARS` and become
+  its own chunk with no heading in it at all. A first attempted fix only
+  force-merged a heading paragraph with whatever followed when the
+  heading had literally nothing else in its own paragraph; that fix
+  itself had a real bug (checked `buffer == paragraph`, which only caught
+  a heading landing ALONE at a chunk boundary, not the more common case of
+  a heading landing at the END of an already-partially-filled buffer) and
+  even once that was fixed, a long Features paragraph exceeding
+  `CHUNK_CHARS` on its own still produced a heading-less chunk regardless.
+  The actual fix: `chunk_text` now tracks a real per-level heading stack
+  (keyed by `#`-depth, not a single flattened "current heading" variable —
+  a first version of that stack conflated levels and forgot a shallower
+  "### Type:" heading the moment a deeper "##### Features" heading
+  appeared) and re-prefixes every currently-open heading onto any chunk
+  that doesn't already contain it verbatim, including hard-split pieces of
+  an oversized paragraph. Verified: FX-201's and FX-202's own Features
+  chunks each now carry that variant's own code in their Qdrant payload,
+  confirmed by direct payload inspection, not just by re-running the
+  customer-facing question.
+- A third issue in the same code path, once the previous two were fixed:
+  `_exact_code_matches`'s own `limit=len(codes)*2` was sized for the OLD
+  world where each code mapped to roughly one relevant chunk — with
+  per-chunk codes now correctly distinguishing variants, a 2-model
+  comparison query can have 10+ genuinely-matching chunks PER code, and a
+  flat small limit meant `scroll()`'s arbitrary ordering could return 4
+  chunks that were all incidentally about one variant, starving the other
+  out of the merged result entirely (reproduced live: a real re-test after
+  the chunking fix still failed, with only one model's numbers ever
+  reaching the LLM). Fixed by fetching generously per code
+  (`max(len(codes) * 10, 20)`), grouping results by which query code each
+  chunk actually carries, preferring each code's own Features/What-it-does/
+  Price chunk (`_PREFERRED_SECTION_MARKERS`, where a comparison's real
+  numbers live) over whichever chunk `scroll()` listed first, and
+  round-robin-ing across codes so every code contributes before any one
+  code's remaining chunks pad out the result — guaranteeing every asked-
+  about code gets real representation rather than losing a coin-flip.
+
+  Verified end-to-end against real production Qdrant, after re-ingesting
+  all four live machines with every fix applied: "FX-201 aur FX-202 mein
+  kya farak hai" now correctly answers "FX-201 ki 1″ accuracy hai, jabki
+  FX-202 ki 2″" (the real, verbatim spec difference) instead of declining;
+  the same fix verified again independently on two other multi-variant
+  machines already live in production — "iX-1201 aur iX-601 mein kya farak
+  hai" correctly distinguished auto-tracking vs. auto-collimation models,
+  and "iM-101 aur iM-105 mein kya farak hai" correctly gave iM-105's real
+  accuracy figure while honestly declining to guess iM-101's rather than
+  inventing one. Regression-checked: a single-code price question, a
+  single-code specs question, and a fully generic query with no code at
+  all all still behave correctly after these changes.
+
 ## Conventions
 
 `uv` only, never pip. `ruff check`/`ruff format` before committing.

@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, create_model
 
-from app import store
+from app import cache, store
 from app.config import settings
 from app.enums import DocumentType
 from app.llm import LLMUnavailableError, complete, embed, transcribe_image
@@ -984,30 +984,99 @@ def _format_single_profile_markdown(profile: ProductVariantProfile, *, heading_l
     return "\n".join(lines).strip()
 
 
+_HEADING_RE = re.compile(r"^(#{2,6})\s+(\S.*)$")
+
+
+def _leading_heading(paragraph: str) -> tuple[int, str] | None:
+    """(level, text) if this paragraph's FIRST line is a markdown heading —
+    used to track which variant/section a chunk belongs to, not to detect a
+    heading-only paragraph specifically (see chunk_text's own docstring for
+    why that narrower check wasn't enough)."""
+    first_line = paragraph.splitlines()[0].strip() if paragraph else ""
+    match = _HEADING_RE.match(first_line)
+    return (len(match.group(1)), match.group(2)) if match else None
+
+
 def chunk_text(text: str, machine_name: str) -> list[str]:
-    """Split on paragraph boundaries, packing up to CHUNK_CHARS.
+    """Split on paragraph boundaries, packing up to CHUNK_CHARS, carrying
+    forward the current `### Type: {variant}` (or deeper) heading into
+    every chunk so it stays self-describing even when that heading's own
+    paragraph and its content end up split across chunks.
 
     Every chunk is prefixed with the machine name so a retrieved fragment is
     self-describing — otherwise a chunk of bare specifications gives the model
-    no way to know which machine it belongs to.
+    no way to know which machine it belongs to. For a multi-variant document
+    that same problem exists one level deeper: a "### Type: SOKKIA FX-202"
+    heading and its actual content (e.g. a long Features paragraph) don't
+    always fit in the same CHUNK_CHARS-sized chunk — the heading can be a
+    short paragraph on its own, while the section that follows it is a
+    single long paragraph that becomes its own chunk. A first version of
+    this function only force-merged a heading with the NEXT paragraph when
+    the heading paragraph had nothing else in it, which fixed the case
+    where the heading landed alone at a chunk boundary — but a bulleted
+    Features section that is itself over CHUNK_CHARS still becomes a chunk
+    with no heading in it at all, silently losing which variant it belongs
+    to. Found live: FX-202's own Features chunk (accuracy, range, etc.)
+    had none of the "FX-202" code in its payload, `_exact_code_matches`
+    never surfaced it for a customer comparing FX-201 and FX-202, and the
+    agent said the difference "isn't in the catalog" despite both models'
+    real numbers being ingested — just not attached to a findable chunk.
+    Tracking the current heading explicitly and re-prefixing it onto every
+    chunk (not just the one immediately after it) is the actual fix; the
+    force-merge behavior is kept too since it produces tidier chunks when
+    it applies, but the heading-tracking is what guarantees correctness
+    even when it doesn't.
     """
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: list[str] = []
     buffer = ""
+    # A real heading stack, keyed by level (2=##, 3=###, ...), not a single
+    # flattened "current heading" — a first version of this tracked only one
+    # level and silently forgot a shallower heading (e.g. "### Type: FX-202")
+    # the moment a deeper one (e.g. "##### Features") appeared, which is
+    # exactly backwards: the variant-level heading is the one a chunk most
+    # needs to keep. Seeing a heading at level L clears every level deeper
+    # than L (their scope has ended) and sets L itself; a level shallower
+    # than anything seen is left alone.
+    heading_stack: dict[int, str] = {}
 
-    for paragraph in paragraphs:
-        if len(buffer) + len(paragraph) + 2 <= CHUNK_CHARS:
-            buffer = f"{buffer}\n\n{paragraph}" if buffer else paragraph
-            continue
+    def prefix_for(paragraph_text: str) -> str:
+        """Every tracked heading not already present verbatim in this
+        paragraph, shallowest first — so a chunk that lost track of "###
+        Type: FX-202" (because its own paragraph was a long Features list
+        with no heading of its own) gets it re-prefixed."""
+        missing = [h for h in heading_stack.values() if h not in paragraph_text]
+        return "\n\n".join([*missing, paragraph_text]) if missing else paragraph_text
+
+    def flush() -> None:
+        nonlocal buffer
         if buffer:
             chunks.append(buffer)
-        # A single paragraph larger than the budget gets hard-split.
-        while len(paragraph) > CHUNK_CHARS:
-            chunks.append(paragraph[:CHUNK_CHARS])
-            paragraph = paragraph[CHUNK_CHARS - CHUNK_OVERLAP :]
-        buffer = paragraph
-    if buffer:
-        chunks.append(buffer)
+        buffer = ""
+
+    for paragraph in paragraphs:
+        heading = _leading_heading(paragraph)
+        if heading is not None:
+            level, _ = heading
+            heading_line = paragraph.splitlines()[0].strip()
+            for deeper in [key for key in heading_stack if key > level]:
+                del heading_stack[deeper]
+            heading_stack[level] = heading_line
+
+        prefixed = prefix_for(paragraph)
+        if len(buffer) + len(prefixed) + 2 <= CHUNK_CHARS:
+            buffer = f"{buffer}\n\n{prefixed}" if buffer else prefixed
+            continue
+        flush()
+        # A single (already-prefixed) paragraph larger than the budget gets
+        # hard-split; each split-off piece needs its own re-prefix too,
+        # since a hard split can separate the heading from later pieces.
+        while len(prefixed) > CHUNK_CHARS:
+            piece = prefixed[:CHUNK_CHARS]
+            chunks.append(piece if not heading_stack.values() else prefix_for(piece))
+            prefixed = prefixed[CHUNK_CHARS - CHUNK_OVERLAP :]
+        buffer = prefixed
+    flush()
 
     return [f"## {machine_name}\n{chunk}" for chunk in chunks]
 
@@ -1032,6 +1101,31 @@ def _stable_point_id(key: str) -> int:
 
     digest = hashlib.md5(key.encode("utf-8")).hexdigest()
     return int(digest[:16], 16) % (2**63)
+
+
+def _extract_codes_excluding_ai_estimate(text: str) -> list[str]:
+    """extract_codes(), but with AI-estimate paragraphs (see
+    _AI_ESTIMATE_PREFIX) stripped out first — found live: an enriched
+    Competitors section naming real rival products ("Leica TS16/TS20",
+    "Trimble S9") got its OWN model codes picked up into THIS machine's
+    `codes` list, so a customer asking about "TS16" (a Leica product,
+    never ours) would incorrectly exact-match this machine's chunk. The
+    stored/RAG text keeps the full enrichment content either way — only
+    the code-extraction input is narrowed. Checked with `in`, not
+    `.startswith()`: format_profile_markdown puts a "#### Label" heading
+    on its own line immediately before the section's text, so the marker
+    is never the first thing in the \n\n-joined paragraph — a startswith
+    check silently missed every real case and this codes list kept
+    leaking competitor codes despite the filter appearing to exist.
+    Shared by both the whole-document codes (doc_codes) and each
+    individual chunk's own codes — a per-chunk price/competitors section
+    is exactly as capable of leaking a rival's code as the document as a
+    whole is.
+    """
+    filtered = "\n\n".join(
+        para for para in text.split("\n\n") if _AI_ESTIMATE_PREFIX.strip() not in para
+    )
+    return extract_codes(filtered)
 
 
 async def ingest_document(
@@ -1063,24 +1157,9 @@ async def ingest_document(
     if client is None:
         return {"chunks": len(chunks), "embedded": 0, "error": "vector store unavailable"}
 
-    # Strip AI-estimate paragraphs (see _AI_ESTIMATE_PREFIX) before pulling
-    # codes — found live: an enriched Competitors section naming real rival
-    # products ("Leica TS16/TS20", "Trimble S9") got its OWN model codes
-    # picked up into THIS machine's `codes` list, so a customer asking about
-    # "TS16" (a Leica product, never ours) would incorrectly exact-match this
-    # machine's chunk. The stored/RAG text keeps the full enrichment content
-    # either way — only the code-extraction input is narrowed. Checked with
-    # `in`, not `.startswith()`: format_profile_markdown puts a "#### Label"
-    # heading on its own line immediately before the section's text, so the
-    # marker is never the first thing in the \n\n-joined paragraph — a
-    # startswith check silently missed every real case and this codes list
-    # kept leaking competitor codes despite the filter appearing to exist.
-    codes_source = "\n\n".join(
-        para for para in text.split("\n\n") if _AI_ESTIMATE_PREFIX.strip() not in para
-    )
-    codes = extract_codes(codes_source)
+    doc_codes = _extract_codes_excluding_ai_estimate(text)
     if machine_code:
-        codes = sorted({machine_code.upper(), *codes})
+        doc_codes = sorted({machine_code.upper(), *doc_codes})
 
     # A re-ingest (edit, re-upload) must replace this machine's OLD chunks,
     # not just add new ones alongside them — the old scheme's point ids
@@ -1137,7 +1216,29 @@ async def ingest_document(
                     "text": chunk,
                     "title": machine_name,
                     "category": category,
-                    "codes": codes,
+                    # Per-chunk, not the whole document's codes — a
+                    # multi-variant document (one machine, several "### Type:
+                    # X" sections) has EVERY variant's code in doc_codes, so
+                    # using that list on every chunk made _exact_code_matches
+                    # useless for telling FX-201 and FX-202 chunks apart: a
+                    # customer asking "FX-201 vs FX-202" got score=1.0 exact
+                    # matches on every chunk, since every chunk's codes list
+                    # contained both, and _exact_code_matches has no
+                    # relevance ranking of its own to fall back on among
+                    # equally-"exact" hits (found live: the comparison
+                    # question got "not available, checking with the team"
+                    # because the one chunk that actually named FX-202's
+                    # numbers never got prioritized over ten others that
+                    # matched exactly as well but said nothing about it).
+                    # This chunk's own extracted codes give exact-match its
+                    # actual discriminating power back; machine_code is
+                    # still folded in on every chunk so a plain "FX-200
+                    # series" or model-code-less query still finds the
+                    # machine at all.
+                    "codes": sorted(
+                        set(_extract_codes_excluding_ai_estimate(chunk))
+                        | ({machine_code.upper()} if machine_code else set())
+                    ),
                     "machine_id": machine_id,
                     "price_range": price_range,
                     "source": source_filename or "upload",
@@ -1159,10 +1260,21 @@ async def ingest_document(
             "machine": machine_name,
             "chunks": len(chunks),
             "embedded": embedded,
-            "codes": codes[:5],
+            "codes": doc_codes[:5],
         },
     )
-    return {"chunks": len(chunks), "embedded": embedded, "codes": codes}
+    # A re-ingest (re-upload, PATCH-edit) replaces this machine's Qdrant
+    # chunks, so every previously cached RAG result for this collection is
+    # now potentially stale — same reasoning as rag.ingest()'s own
+    # invalidation for the bundled knowledge_base.md path, which this
+    # machine-document path was missing entirely. Found live: after
+    # re-ingesting a corrected document, search() kept returning the OLD
+    # chunks for a query already served once, for the rest of
+    # cache_rag_ttl_seconds (20 minutes) — a real edit or fix looked like it
+    # hadn't taken effect. Clears the whole "rag" namespace rather than
+    # guessing which normalized queries this specific machine might affect.
+    await cache.invalidate_namespace("rag")
+    return {"chunks": len(chunks), "embedded": embedded, "codes": doc_codes}
 
 
 async def ingest_accessory(
@@ -1235,6 +1347,10 @@ async def ingest_accessory(
     # succeeded end-to-end (earlier attempts failed on a missing table before
     # ever reaching this line). accessory_name avoids the collision.
     log.info("accessory_ingested", extra={"accessory_id": accessory_id, "accessory_name": name})
+    # Same reasoning as ingest_document's own invalidation — a stale cached
+    # RAG result would otherwise keep serving pre-edit content for up to
+    # cache_rag_ttl_seconds after a real accessory change.
+    await cache.invalidate_namespace("rag")
     return {"chunks": 1, "embedded": 1}
 
 
