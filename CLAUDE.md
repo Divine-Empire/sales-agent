@@ -567,6 +567,52 @@ reflects the old collapsed profile — it needs a re-upload to split into
 separate FX-201/FX-202 machines under the new behavior; this hasn't been
 triggered yet.
 
+### Stable Qdrant point ids (fixed 2026-08-30, found while auditing the above)
+
+`ingest_document`'s and `ingest_accessory`'s deterministic point ids were
+computed with Python's builtin `hash()` — which is **process-randomized for
+strings by default** (`PYTHONHASHSEED`). The same machine/accessory + chunk
+index produced a genuinely different Qdrant point id every time the backend
+process restarted (a new Render deploy, a worker cycling), which quietly
+broke the exact behavior both docstrings claimed: "re-uploading the same
+document updates in place." After any restart, a re-upload or a
+`PATCH /api/machines/documents/{id}` edit instead **added a second, orphaned
+copy** of the old content next to the corrected one — the agent could then
+answer from either, including the stale one, with no error or signal
+anywhere that this had happened. Never reported by a customer; caught by
+auditing this code path while reviewing the multi-variant work above, not
+by reproducing a live symptom.
+
+Two-part fix, `app/documents.py`:
+- `_stable_point_id()` replaces `hash()` with `hashlib.md5` — deterministic
+  for the same input in any process, forever, not just within one run.
+- `ingest_document` now **deletes all existing Qdrant points for that
+  `machine_id` before upserting the new ones**, rather than relying solely
+  on point-id reuse to overwrite in place. This is what actually makes a
+  re-ingest correct even when the new document has fewer chunks than the
+  old one — point-id overwrite alone would leave a stale tail of the old
+  document's extra chunks behind. `id_key_base` prefers `machine_id` (a
+  UUID, collision-proof across machines) over `machine_name`, falling back
+  to the name only for the rare caller with no id yet.
+- `delete_accessory_from_index` changed from a by-id delete (computed from
+  today's id scheme) to a payload-filtered delete on `accessory_id` — a
+  by-id delete would silently miss any accessory ingested under the old
+  `hash()` scheme, since its real stored id doesn't match what the new
+  scheme computes. Needed its own new Qdrant payload index on
+  `accessory_id` (same "index required but not found" 400 as `codes`/
+  `machine_id` before it), created once directly against production the
+  same way those were, via `ensure_collection()`.
+
+Verified end-to-end against real Qdrant: ingesting a long test document (5
+chunks) then re-ingesting a much shorter replacement (1 chunk) left exactly
+1 point in Qdrant for that `machine_id`, not 6 — confirming no orphaned
+tail. Accessory ingest → delete confirmed via direct scroll: 1 point found
+before delete, 0 after. Production's existing ~32 Qdrant points predate
+this fix and were not touched — they only risk becoming orphaned/duplicated
+the next time they're re-ingested after a restart, which this fix now
+prevents going forward; no retroactive cleanup was needed since nothing had
+actually been re-ingested since the collection was last fully rebuilt.
+
 ### Cross-machine matching — enrich the RAG query with what's already known (2026-08-28)
 
 `rag.search()` was only ever given the customer's single current message.

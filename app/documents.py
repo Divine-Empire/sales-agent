@@ -582,6 +582,28 @@ def chunk_text(text: str, machine_name: str) -> list[str]:
     return [f"## {machine_name}\n{chunk}" for chunk in chunks]
 
 
+def _stable_point_id(key: str) -> int:
+    """A Qdrant point id that is stable across processes and deploys.
+
+    The previous version used Python's builtin `hash()`, which is
+    process-randomized for strings by default (PYTHONHASHSEED) — the same
+    machine+chunk-index produced a DIFFERENT id every time the backend
+    restarted (a new Render deploy, a worker process cycling). The
+    "re-uploading the same document updates in place" comment this scheme's
+    docstring made was therefore false across restarts: a re-upload or edit
+    after a deploy silently added a second, orphaned copy of every chunk
+    instead of replacing the first, so a customer's answer could come from
+    stale content sitting alongside the corrected version. Found while
+    reviewing the multi-variant work, not something that surfaced through a
+    customer report — fixed before it did. `hashlib.md5` is deterministic
+    for the same input in any process, any process, forever.
+    """
+    import hashlib
+
+    digest = hashlib.md5(key.encode("utf-8")).hexdigest()
+    return int(digest[:16], 16) % (2**63)
+
+
 async def ingest_document(
     *,
     machine_name: str,
@@ -615,6 +637,37 @@ async def ingest_document(
     if machine_code:
         codes = sorted({machine_code.upper(), *codes})
 
+    # A re-ingest (edit, re-upload) must replace this machine's OLD chunks,
+    # not just add new ones alongside them — the old scheme's point ids
+    # weren't stable enough for upsert-in-place to reliably do that across a
+    # process restart (see _stable_point_id). Deleting by machine_id first
+    # makes this correct regardless: fewer new chunks than before leaves no
+    # orphaned tail, and it degrades safely — a delete failure here just
+    # means the upsert below adds alongside whatever's left, no worse than
+    # the previous behavior, never a hard failure of the upload itself.
+    if machine_id:
+        try:
+            await client.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="machine_id", match=models.MatchValue(value=machine_id)
+                            )
+                        ]
+                    )
+                ),
+            )
+        except Exception:
+            log.exception("ingest_pre_delete_failed", extra={"machine_id": machine_id})
+
+    # id_key is scoped to machine_id when known (a real UUID, so two machines
+    # can never collide even if they briefly share a display name) and falls
+    # back to machine_name only for the rare caller that doesn't have an id
+    # yet — still deterministic, just a narrower guarantee.
+    id_key_base = machine_id or machine_name
+
     embedded = 0
     batch_size = 16  # small batches keep peak memory low on the free tier
     for start in range(0, len(chunks), batch_size):
@@ -628,9 +681,12 @@ async def ingest_document(
             break
         points = [
             models.PointStruct(
-                # Deterministic per machine + chunk index, so re-uploading the
-                # same document updates in place instead of duplicating.
-                id=abs(hash(f"{machine_name}:{start + offset}")) % (2**63),
+                # Deterministic per machine + chunk index, and stable across
+                # restarts (see _stable_point_id) — combined with the
+                # pre-delete above, a re-upload/edit genuinely replaces the
+                # old content rather than risking a stale duplicate sitting
+                # alongside it.
+                id=_stable_point_id(f"{id_key_base}:{start + offset}"),
                 vector=vector,
                 payload={
                     "text": chunk,
@@ -702,8 +758,13 @@ async def ingest_accessory(
     point = models.PointStruct(
         # Deterministic per accessory id, so re-editing updates the same
         # point in place instead of duplicating — mirrors ingest_document's
-        # deterministic id scheme for machine chunks.
-        id=abs(hash(f"accessory:{accessory_id}")) % (2**63),
+        # deterministic id scheme for machine chunks. Uses _stable_point_id
+        # (hashlib, not the builtin hash()) for the same reason documented
+        # there: builtin hash() is process-randomized for strings, so this
+        # accessory's insert id and delete_accessory_from_index's delete id
+        # would silently stop matching after any backend restart, leaving an
+        # orphaned point no delete call could ever reach again.
+        id=_stable_point_id(f"accessory:{accessory_id}"),
         vector=vectors[0],
         payload={
             "text": chunk,
@@ -733,16 +794,35 @@ async def ingest_accessory(
 
 
 async def delete_accessory_from_index(accessory_id: str) -> None:
-    """Remove an accessory's Qdrant point. Deterministic single-point id —
-    accessory text rarely needs more than one chunk (see ingest_accessory)."""
+    """Remove an accessory's Qdrant point(s).
+
+    Deletes by payload filter on `accessory_id` rather than by computing the
+    expected point id and deleting that single id directly. This matters
+    because of a real migration edge: any accessory ingested before the
+    _stable_point_id fix used the old, process-randomized `hash()` scheme,
+    so its actual stored point id does not equal what this function would
+    compute today — a by-id delete would silently delete nothing and leave
+    that accessory's stale point behind forever. A payload filter finds the
+    point regardless of which id scheme created it, at the one-time cost of
+    a filtered scan instead of a direct point lookup (accessories are few
+    and this call is not on any hot path)."""
+    from qdrant_client import models
+
     client = get_client()
     if client is None:
         return
-    point_id = abs(hash(f"accessory:{accessory_id}")) % (2**63)
     try:
         await client.delete(
             collection_name=settings.qdrant_collection,
-            points_selector=[point_id],
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="accessory_id", match=models.MatchValue(value=accessory_id)
+                        )
+                    ]
+                )
+            ),
         )
     except Exception:
         log.exception("accessory_index_delete_failed", extra={"accessory_id": accessory_id})

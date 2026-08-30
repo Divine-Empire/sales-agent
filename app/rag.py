@@ -155,6 +155,16 @@ async def ensure_collection() -> bool:
             field_name="machine_id",
             field_schema=models.PayloadSchemaType.KEYWORD,
         )
+        # Needed for documents.delete_accessory_from_index's payload-filtered
+        # delete, same "index required but not found" 400 as codes/machine_id
+        # above — added when that delete was switched from a by-id lookup to
+        # a payload filter (see its docstring: a by-id delete silently missed
+        # any accessory ingested before the stable-point-id fix).
+        await client.create_payload_index(
+            collection_name=settings.qdrant_collection,
+            field_name="accessory_id",
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
         return True
     except Exception:
         log.exception("qdrant_collection_failed")
