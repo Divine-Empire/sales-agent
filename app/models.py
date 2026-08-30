@@ -129,13 +129,16 @@ class Machine(BaseModel):
 
 
 class Accessory(BaseModel):
-    """A part/accessory catalog entry. Manually maintained, not sourced from
-    documents. No machine linkage yet — deliberately deferred until there is
-    real data to model the relationship against."""
+    """A part/accessory catalog entry, belonging to exactly one machine.
+    Manually maintained, not sourced from documents. Simple FK, not a
+    many-to-many join — the client's own workflow is "pick a machine, then
+    add accessories for it," so an accessory genuinely shared across two
+    machines is entered twice rather than modeled as a shared relationship."""
 
     model_config = ConfigDict(use_enum_values=True)
 
     id: str | None = None
+    machine_id: str
     name: str
     category: str | None = None
     description: str | None = None

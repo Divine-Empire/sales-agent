@@ -753,25 +753,29 @@ async def list_machines(category: str | None = None) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# accessories — parts/accessories catalog, manually maintained (no machine
-# linkage yet — deferred, see app/models.py's Accessory docstring)
+# accessories — parts/accessories catalog, each belonging to exactly one
+# machine (see app/models.py's Accessory docstring for why a simple FK,
+# not a many-to-many join)
 # ---------------------------------------------------------------------------
 
 
 async def upsert_accessory(
     *,
     accessory_id: str | None = None,
+    machine_id: str,
     name: str,
     category: str | None = None,
     description: str | None = None,
 ) -> str | None:
-    """Insert a new accessory, or update an existing one when accessory_id is
-    given. The counterpart to upsert_machine, minus the machine_code
-    conflict key since accessories aren't keyed by a catalog code."""
+    """Insert a new accessory under a machine, or update an existing one
+    when accessory_id is given. The counterpart to upsert_machine, minus
+    the machine_code conflict key since accessories aren't keyed by a
+    catalog code."""
     client = await get_client()
     if client is None:
         return None
     payload = {
+        "machine_id": machine_id,
         "name": name,
         "category": category,
         "description": description,
@@ -785,11 +789,8 @@ async def upsert_accessory(
         else:
             result = await client.table("accessories").insert(payload).execute()
         row_id = result.data[0]["id"] if result.data else accessory_id
-        log.info("accessory_upserted", extra={"id": row_id})
-        await cache.invalidate(
-            cache.accessories_list_key(None),
-            cache.accessories_list_key(category),
-        )
+        log.info("accessory_upserted", extra={"id": row_id, "machine_id": machine_id})
+        await cache.invalidate(cache.accessories_list_key(machine_id))
         return row_id
     except Exception:
         log.exception("accessory_upsert_failed", extra={"id": accessory_id})
@@ -810,10 +811,7 @@ async def update_accessory_fields(accessory_id: str, fields: dict[str, Any]) -> 
         log.info("accessory_fields_updated", extra={"accessory_id": accessory_id})
         if result.data:
             row = result.data[0]
-            await cache.invalidate(
-                cache.accessories_list_key(None),
-                cache.accessories_list_key(row.get("category")),
-            )
+            await cache.invalidate(cache.accessories_list_key(row.get("machine_id")))
         return True
     except Exception:
         log.exception("accessory_update_failed", extra={"accessory_id": accessory_id})
@@ -829,25 +827,28 @@ async def delete_accessory(accessory_id: str) -> bool:
         log.info("accessory_deleted", extra={"accessory_id": accessory_id})
         if result.data:
             row = result.data[0]
-            await cache.invalidate(
-                cache.accessories_list_key(None),
-                cache.accessories_list_key(row.get("category")),
-            )
+            await cache.invalidate(cache.accessories_list_key(row.get("machine_id")))
         return True
     except Exception:
         log.exception("accessory_delete_failed", extra={"accessory_id": accessory_id})
         return False
 
 
-async def list_accessories(category: str | None = None) -> list[dict[str, Any]]:
+async def list_accessories(machine_id: str | None = None) -> list[dict[str, Any]]:
+    """All active accessories, or just one machine's when machine_id is
+    given — the dashboard's per-machine accessories section always passes
+    one; the agent's RAG ingestion path (which embeds regardless of machine)
+    doesn't need this list at all, since ingest_accessory is called directly
+    per-accessory at write time."""
+
     async def _fetch() -> list[dict[str, Any]]:
         client = await get_client()
         if client is None:
             return []
         try:
             query = client.table("accessories").select("*").eq("is_active", True)
-            if category:
-                query = query.eq("category", category)
+            if machine_id:
+                query = query.eq("machine_id", machine_id)
             result = await query.execute()
             return result.data or []
         except Exception:
@@ -855,7 +856,7 @@ async def list_accessories(category: str | None = None) -> list[dict[str, Any]]:
             return []
 
     return await cache.get_or_set(
-        cache.accessories_list_key(category), settings.cache_machine_ttl_seconds, _fetch
+        cache.accessories_list_key(machine_id), settings.cache_machine_ttl_seconds, _fetch
     )
 
 

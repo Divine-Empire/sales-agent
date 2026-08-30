@@ -334,38 +334,74 @@ document is skipped rather than run up a large per-page API bill silently;
 logged as `ocr_skipped_too_many_pages`). New deps: `pypdfium2`, `pillow`
 (both pure-wheel, safe on Render's buildpack).
 
-## Catalog: accessories/parts (added 2026-08-27)
+## Catalog: accessories/parts (added 2026-08-27, machine-linked 2026-08-28)
 
-A second, deliberately simpler catalog table alongside `machines`:
-`accessories` (`migrations/004_accessories.sql`) — `name`, `category`,
-`description`, `is_active`, no other fields. **No machine linkage yet** —
-that's an explicit, deferred design decision, not an oversight. Accessories
-are entered manually (typed/pasted into the dashboard), never via document
-upload; there is no OCR/extraction path for them and none is planned until
-Google Sheet integration is revisited.
+A second catalog table alongside `machines`: `accessories`
+(`migrations/004_accessories.sql` + `005_accessories_machine_link.sql`) —
+`name`, `category`, `description`, `is_active`, and (since 005) `machine_id`
+(FK to `machines`, `on delete cascade`). Originally shipped flat/unlinked
+("no machine linkage yet, deferred until there's real data to model the
+relationship against") — the client's actual workflow turned out to be
+"pick a machine, then add its accessories," so 005 added the FK the same
+day. **Simple FK, not a many-to-many join, deliberately**: an accessory
+genuinely shared across two machines is entered twice rather than modeled
+as a shared relationship — matches how the client thinks about it, avoids
+join-table complexity with no present payoff. Accessories are entered
+manually (typed/pasted into the dashboard), never via document upload;
+there is no OCR/extraction path for them and none is planned until Google
+Sheet integration is revisited.
+
+**Both migrations had only ever been written as files, never applied to
+production** — discovered live when `store.upsert_accessory` started
+throwing `PGRST205: Could not find the table 'public.accessories' in the
+schema cache` the first time an accessory create was actually exercised
+end-to-end (every prior "it works" verification had used a monkeypatched
+store, which never touches real Postgres). Applied both directly via `psql`
+against the pooler connection string, then `NOTIFY pgrst, 'reload schema'`
+to force PostgREST to pick up the new table without waiting for its own
+poll interval. If you add a future migration file, actually running it
+against production is a separate step from writing it — this bit us once.
 
 CRUD lives in `app/store.py` (`upsert_accessory`/`update_accessory_fields`/
-`delete_accessory`/`list_accessories`, mirroring the `machines` functions)
-and `/api/accessories` routes in `app/main.py` (GET list, POST create, PATCH
-update, DELETE). Same public-read RLS exception as `machines`
-(`migrations/004_accessories.sql`) since chat needs to read it without a
-service-key path.
+`delete_accessory`/`list_accessories`, mirroring the `machines` functions;
+`list_accessories(machine_id=...)` filters to one machine, which is what
+the dashboard's per-machine section always passes) and `/api/accessories`
+routes in `app/main.py` (GET list with optional `?machine_id=`, POST create
+— now requires `machine_id` in the body — PATCH update, DELETE). Same
+public-read RLS exception as `machines` (`migrations/004_accessories.sql`)
+since chat needs to read it without a service-key path.
 
 RAG ingestion reuses `app/documents.py`'s existing chunk/embed/Qdrant-upsert
-machinery via a new `ingest_accessory()` — one Qdrant point per accessory
-(name + description, rarely needs chunking), payload tagged
-`record_type: "accessory"` so it's distinguishable from machine chunks if
-that's ever needed. Deleting or deactivating an accessory removes its Qdrant
-point (`delete_accessory_from_index`) — note this is *not* what `machines`
-does today; `delete_machine` leaves its Qdrant chunks behind. Don't assume
-parity between the two catalogs' delete behavior.
+machinery via `ingest_accessory()` — one Qdrant point per accessory (name +
+description, rarely needs chunking), payload tagged `record_type:
+"accessory"` so it's distinguishable from machine chunks if that's ever
+needed. Deleting or deactivating an accessory removes its Qdrant point
+(`delete_accessory_from_index`) — note this is *not* what `machines` does
+today; `delete_machine` leaves its Qdrant chunks behind. Don't assume parity
+between the two catalogs' delete behavior. (Fixed in the same pass: a
+`log.info(..., extra={"name": name})` call in `ingest_accessory` collided
+with `LogRecord`'s own reserved `name` attribute and raised `KeyError` at
+log time — never caught before because every earlier attempt failed on the
+missing table first. Renamed to `accessory_name`; grep the rest of the
+codebase for the same `extra={"name": ...}` pattern before reusing it
+elsewhere.)
 
-`app/prompts.py`'s `SYSTEM_PROMPT` was rewritten in the same pass (2026-08-27)
-for shorter replies, an explicit cross-questioning framework (company,
-location, project type, timeline), and recommending accessories alongside a
-machine once one's been identified — still bound by the existing "never
-invent a spec" rule. Prompt-only change; no new tools, no `agent.py`
-structural change.
+**Accessories are a closing detail, not a sales pitch point** (client
+requirement, 2026-08-28): `app/prompts.py` no longer tells the model to
+recommend an accessory once a machine is identified — that guidance
+actively contradicted the client's actual sales process, where mentioning
+what "comes with" a machine before the deal is confirmed reads as
+overselling. A new ACCESSORIES hard rule says explicitly: never bring
+accessories up while still selling the machine — not on first
+recommendation, not answering follow-ups, not during qualifying. Only once
+the customer has actually committed (said yes, confirmed an order, asked to
+proceed) does the agent mention what comes with it, framed as a closing
+note, not a pitch. Verified end-to-end against a real test machine +
+accessory: neither "tell me about X" nor an order-confirmation turn (which
+correctly went to request_human_handoff instead, since the sales team still
+needs to confirm specifics) mentioned the accessory — matching the rule
+that accessories wait for actual confirmation, not just a stated intent to
+order.
 
 ## Product knowledge depth — optional rich profiles (added 2026-08-28)
 

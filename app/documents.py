@@ -499,7 +499,12 @@ async def ingest_accessory(
         log.exception("accessory_ingest_upsert_failed", extra={"accessory_id": accessory_id})
         return {"chunks": 1, "embedded": 0, "error": "upsert failed"}
 
-    log.info("accessory_ingested", extra={"accessory_id": accessory_id, "name": name})
+    # "name" is a reserved LogRecord attribute (the logger's own name) — using
+    # it as an extra key raises KeyError at log time, not at review time, so
+    # this was never actually caught until an accessory insert first
+    # succeeded end-to-end (earlier attempts failed on a missing table before
+    # ever reaching this line). accessory_name avoids the collision.
+    log.info("accessory_ingested", extra={"accessory_id": accessory_id, "accessory_name": name})
     return {"chunks": 1, "embedded": 1}
 
 

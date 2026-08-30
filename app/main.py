@@ -795,6 +795,7 @@ async def update_machine(machine_id: str, update: MachineUpdate) -> dict[str, An
 
 
 class AccessoryCreate(BaseModel):
+    machine_id: str
     name: str
     category: str | None = None
     description: str | None = None
@@ -808,16 +809,21 @@ class AccessoryUpdate(BaseModel):
 
 
 @api.get("/accessories")
-async def accessories(category: str | None = None) -> dict[str, Any]:
-    rows = await store.list_accessories(category=category)
+async def accessories(machine_id: str | None = None) -> dict[str, Any]:
+    """Every accessory, or just one machine's — the dashboard's per-machine
+    accessories section always passes machine_id; each accessory belongs to
+    exactly one machine (see app/models.py's Accessory docstring)."""
+    rows = await store.list_accessories(machine_id=machine_id)
     return {"count": len(rows), "accessories": rows}
 
 
 @api.post("/accessories")
 async def create_accessory(payload: AccessoryCreate) -> dict[str, Any]:
-    """Add an accessory/part by typing it in directly — no document upload,
-    since these are entered manually per the current workflow."""
+    """Add an accessory/part under a specific machine by typing it in
+    directly — no document upload, since these are entered manually per
+    the current workflow."""
     accessory_id = await store.upsert_accessory(
+        machine_id=payload.machine_id,
         name=payload.name,
         category=payload.category,
         description=payload.description,
