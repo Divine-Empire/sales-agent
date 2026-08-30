@@ -1193,6 +1193,32 @@ overriding a lead's category is a correction, not a permanent lock.
   budget hai ya per unit?" rather than accepting it, citing the real
   per-unit price from context; a regression check confirmed an ordinary
   small quantity ("2" units) does NOT spuriously trigger the handoff tool.
+- A third read of the same transcript found a real machine-name-drift bug
+  the earlier "MULTIPLE TYPES UNDER ONE MACHINE" fix didn't catch: across
+  three consecutive turns the same conversation named FX-201, then the
+  generic "Sokkia FX-200 Series", then FX-202 — with no explanation for
+  any of the switches, and no customer message that actually changed which
+  type fit. Once the customer said "Boundary" (single-machine-with-variants
+  retrieval had already surfaced both FX-201 and FX-202 in one chunk), each
+  later turn's own retrieval could resurface either type first depending on
+  which words in that turn's message scored closest, and the model just
+  named whichever one it saw, with no rule telling it that a name spoken
+  two turns ago is a commitment, not a suggestion that resets every turn.
+  Added a new hard rule, STAY ON THE SAME MACHINE ONCE YOU'VE NAMED ONE:
+  once a specific machine/type has been named, keep naming that same one
+  in later replies unless the customer says something that genuinely
+  changes the answer — and if it does change, say so plainly rather than
+  silently substituting one name for another. Verified: replaying the
+  exact "Survey ke liye" -> "Boundary" -> "Raipur" turn sequence 3 times,
+  the model now withholds naming any specific type until a real
+  differentiating signal actually arrives (2/3 runs asked the precision
+  question through all three turns without naming either type at all,
+  since none of "Survey ke liye"/"Boundary"/"Raipur" alone fully resolved
+  it; the 1/3 run where "Boundary" was read as pointing to the
+  high-precision type correctly named FX-201 and then stayed on FX-201 for
+  the following turn, rather than drifting to a second name) — a stricter
+  and more consistent outcome than the original transcript's three
+  different names in three turns.
 
 ## Conventions
 
