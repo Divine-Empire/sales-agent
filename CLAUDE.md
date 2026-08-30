@@ -1168,6 +1168,31 @@ overriding a lead's category is a correction, not a permanent lock.
   ("FX-201 ka price kya hai") still answers directly and a genuine open
   product question still gets a category + qualifying question, so neither
   fix narrowed those existing correct behaviors.
+- The same transcript surfaced two more gaps once the conversation reached
+  a real bulk-order shape (2026-08-30): the customer stated a 200-unit
+  quantity and later a ₹2,00,000 budget for those 200 units — impossible
+  on its face, since one FX-200-series unit alone is worth ₹5.2-6.5 lakh
+  per the same context, so ₹2 lakh doesn't cover even one unit, let alone
+  200. The agent accepted both numbers at face value with no arithmetic
+  check and never called `request_human_handoff` for the 200-unit
+  quantity at all — it kept asking ordinary qualifying questions
+  ("khud finalize karenge ya team se approval?") as if 200 units were a
+  routine single-site purchase, right through to a fourth follow-up turn.
+  Two rule additions, no code change (same as the multiple-types fix
+  above, this is data the model already has, it just had no rule telling
+  it to check): a NUMBERS MUST MAKE SENSE TOGETHER hard rule requires
+  doing the quantity × approximate-price arithmetic before accepting a
+  stated budget, and asking a plain clarifying question ("total budget hai
+  ya per-unit?") rather than proceeding when it clearly doesn't fit: and
+  `request_human_handoff`'s own description now states explicitly that a
+  bulk order is defined by quantity alone ("tens or hundreds" of units)
+  and must be called the moment that quantity is stated, not deferred
+  until the customer separately asks for a formal quote. Verified: 3/3
+  clean runs calling `request_human_handoff` the turn "200" was stated as
+  the quantity; 3/3 clean runs correctly questioning "₹2,00,000 total
+  budget hai ya per unit?" rather than accepting it, citing the real
+  per-unit price from context; a regression check confirmed an ordinary
+  small quantity ("2" units) does NOT spuriously trigger the handoff tool.
 
 ## Conventions
 
