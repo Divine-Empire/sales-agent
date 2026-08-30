@@ -408,6 +408,57 @@ correctly said "I can't guarantee that" while staying helpful, and the
 AI-disclosure question got a direct, non-evasive answer that didn't derail
 the conversation.
 
+### Automatic profile structuring on upload (added 2026-08-28)
+
+The client wanted the rich shape above filled in automatically, not typed by
+hand: type the machine name, upload the document, and the profile appears
+already structured (still editable afterward if something needs fixing).
+`app/documents.py`'s `structure_product_profile()` does this — one LLM
+call (tool-call schema `PROFILE_TOOL`, one nullable string field per
+section) over the raw extracted text, wired into `add_machine_from_document`
+right after `extract_text`. The critical constraint, same as everywhere else
+in this codebase: a section the source document doesn't actually cover
+comes back `null` and is left out of the rendered markdown
+(`format_profile_markdown`) entirely — never padded with plausible-sounding
+content. Verified against a sparse spec-sheet-style text: it filled
+what_it_does/features/price/who_should_(not)_buy from real content and
+correctly left objections/competitors/FAQs/etc. null since the source text
+never mentioned them, rather than inventing generic ones.
+
+Falls back to ingesting the raw extracted text unchanged if the structuring
+call itself fails (LLM unavailable, bad tool-call JSON) — an LLM hiccup
+costs richness, never the whole upload. `add_machine_from_document`'s
+response now includes `profile_sections_filled` so the dashboard can show
+the uploader how much the source document actually supported.
+
+**Editing afterward**: `PATCH /api/machines/documents/{document_id}`
+(`app/main.py`) updates `machine_documents.content` and re-ingests into
+Qdrant immediately — a human correction to an AI-structured (or any other)
+document takes effect right away, not just on the next re-upload. Backed
+by two new store functions: `get_machine_document` (full row including
+`content`, which `list_machine_documents` deliberately omits) and
+`update_machine_document_content`. `get_machine_by_id` (new) resolves
+`machine_name`/`category`/`machine_code` for the re-ingest call, since the
+document row only carries `machine_id`.
+
+**Deleting a machine now actually cleans up** (added same day, found while
+testing the above): `DELETE /api/machines/{machine_id}` used to leave every
+one of that machine's Qdrant chunks behind — documented as a known gap
+("`delete_machine` leaves its Qdrant chunks behind, unlike accessories")
+that turned out to matter once verified end-to-end: a deleted machine's
+specs/price could still surface in a customer's answer via RAG, since
+Postgres no longer had the row but Qdrant still did. Fixed with
+`documents.delete_machine_from_index()` — a payload-filtered delete on
+`machine_id` (a machine's document can chunk into many points, unlike an
+accessory's single deterministic-id point, so there's no one id to target).
+This needed its own payload index, same "index required but not found" 400
+as the `codes` index did — `ensure_collection()` now also creates a
+`machine_id` keyword index, created once directly against production the
+same way the `codes` one was. Verified end-to-end: uploaded a test machine,
+edited its document, deleted it, then confirmed via a direct Qdrant scroll
+that zero points remained for that `machine_id` — the delete route's Qdrant
+call now returns 200, not the silent-orphan 400 it used to.
+
 ## What the dashboard (sibling repo) can rely on
 
 The `/api/*` surface as of this writing: `leads`, `handovers` (+ PATCH status

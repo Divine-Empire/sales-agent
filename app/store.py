@@ -536,6 +536,22 @@ async def get_machine_by_code(machine_code: str) -> dict[str, Any] | None:
     )
 
 
+async def get_machine_by_id(machine_id: str) -> dict[str, Any] | None:
+    """Row lookup by primary key — the counterpart to get_machine_by_code,
+    needed wherever a caller only has the id (e.g. re-ingesting a document
+    after an edit, which knows machine_id from machine_documents, not the
+    machine_code)."""
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = await client.table("machines").select("*").eq("id", machine_id).limit(1).execute()
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("machine_fetch_by_id_failed", extra={"machine_id": machine_id})
+        return None
+
+
 async def upsert_machine(
     *,
     machine_code: str,
@@ -634,6 +650,48 @@ async def save_machine_document(
         return result.data[0]["id"] if result.data else None
     except Exception:
         log.exception("machine_document_save_failed", extra={"machine_id": machine_id})
+        return None
+
+
+async def get_machine_document(document_id: str) -> dict[str, Any] | None:
+    """Full row including content — the counterpart to list_machine_documents,
+    which deliberately omits content since the list view never needed it."""
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("machine_documents")
+            .select("*")
+            .eq("id", document_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("machine_document_fetch_failed", extra={"document_id": document_id})
+        return None
+
+
+async def update_machine_document_content(document_id: str, content: str) -> dict[str, Any] | None:
+    """Edit an already-ingested document's stored text — the counterpart to
+    save_machine_document, for correcting an AI-structured profile (or any
+    document content) after the fact. Returns the updated row (including
+    machine_id) so the caller can re-ingest into Qdrant without a second
+    lookup."""
+    client = await get_client()
+    if client is None:
+        return None
+    try:
+        result = (
+            await client.table("machine_documents")
+            .update({"content": content, "indexed_at": _now()})
+            .eq("id", document_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        log.exception("machine_document_update_failed", extra={"document_id": document_id})
         return None
 
 

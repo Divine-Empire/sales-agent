@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from typing import Any
 
 from app import store
 from app.config import settings
 from app.enums import DocumentType
-from app.llm import embed, transcribe_image
+from app.llm import LLMUnavailableError, complete, embed, transcribe_image
 from app.logging_config import get_logger
 from app.rag import ensure_collection, extract_codes, get_client
 
@@ -195,6 +196,138 @@ def _extract_docx(data: bytes) -> str:
     if not combined:
         raise ExtractionError("The document appears to be empty.")
     return combined
+
+
+# The product-profile template (data/product_profile_template.md) as a tool
+# schema — one nullable string field per section, so the model can genuinely
+# omit what a source document doesn't cover rather than being forced to
+# invent something to fill every field. `null` here means "not in this
+# document", which is exactly the signal _format_profile_markdown needs to
+# leave that section out rather than emit an empty heading.
+PROFILE_SECTIONS = [
+    ("what_it_does", "What it does"),
+    ("who_should_buy", "Who should buy it"),
+    ("who_should_not_buy", "Who should NOT buy it"),
+    ("features", "Features"),
+    ("benefits", "Benefits"),
+    ("price", "Price"),
+    ("competitors", "Competitors"),
+    ("advantages", "Advantages"),
+    ("limitations", "Limitations"),
+    ("common_objections", "Common objections"),
+    ("responses", "Responses"),
+    ("faqs", "Frequently asked questions"),
+    ("upselling_opportunities", "Upselling opportunities"),
+]
+
+PROFILE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "record_product_profile",
+        "description": (
+            "Record the product profile extracted from the document, one field per section."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                key: {
+                    "type": ["string", "null"],
+                    "description": (
+                        f"{label}. Use null if the document genuinely does not cover this — "
+                        "never invent content to fill a section."
+                    ),
+                }
+                for key, label in PROFILE_SECTIONS
+            },
+            "required": [key for key, _ in PROFILE_SECTIONS],
+        },
+    },
+}
+
+PROFILE_PROMPT = """You turn a raw product document (a brochure, spec sheet, or manual) into a
+structured profile for a sales agent to use later.
+
+Extract only what the document actually supports — never invent a feature, a competitor, an
+objection, or an FAQ that isn't genuinely there. A section the document doesn't cover should be
+left null, not padded with generic or plausible-sounding content. This matters more than
+completeness: a missing section costs nothing, a fabricated one costs the sales team's
+credibility the moment a customer catches it.
+
+Where the document gives you the raw material but not the finished shape — e.g. it lists specs
+but never states the benefit of each one, or it never explicitly poses objections/FAQs but the
+content answers ones a reasonable buyer would ask — you may synthesize a reasonable inference
+FROM material that is actually present, but do not introduce facts, numbers, or claims that
+aren't grounded in the document itself. If in doubt, leave the section null."""
+
+
+async def structure_product_profile(
+    raw_text: str, machine_name: str, conversation_id: str | None = None
+) -> dict[str, str] | None:
+    """Turn raw extracted document text into the rich product-profile shape
+    (data/product_profile_template.md) via one LLM call.
+
+    Returns a dict of {section_key: text} with only the sections the source
+    document actually supported — a section the model left null is simply
+    absent from the returned dict, never filled with placeholder text.
+    Returns None on any failure (LLM unavailable, malformed tool call), so
+    the caller can fall back to ingesting the raw text unchanged rather than
+    losing the upload entirely.
+    """
+    try:
+        response = await complete(
+            [
+                {"role": "system", "content": PROFILE_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Machine: {machine_name}\n\nDocument text:\n\n{raw_text}",
+                },
+            ],
+            tools=[PROFILE_TOOL],
+            temperature=0.1,  # extraction, not conversation — low variance wins
+            max_output_tokens=2000,  # a dense multi-section profile needs real room
+            conversation_id=conversation_id,
+        )
+    except LLMUnavailableError:
+        log.warning("profile_structuring_llm_unavailable", extra={"machine": machine_name})
+        return None
+
+    if not response.tool_calls:
+        log.warning("profile_structuring_no_tool_call", extra={"machine": machine_name})
+        return None
+
+    try:
+        data = json.loads(response.tool_calls[0].function.arguments)
+    except json.JSONDecodeError:
+        log.warning("profile_structuring_bad_json", extra={"machine": machine_name})
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    profile = {
+        key: value.strip()
+        for key, _ in PROFILE_SECTIONS
+        if isinstance(value := data.get(key), str) and value.strip()
+    }
+    log.info(
+        "profile_structured",
+        extra={"machine": machine_name, "sections_filled": len(profile)},
+    )
+    return profile or None
+
+
+def format_profile_markdown(profile: dict[str, str], machine_name: str) -> str:
+    """Render a structured profile as `##`/`###` markdown — the same shape
+    `data/knowledge_base.md` uses, so chunk_text's paragraph/heading-based
+    splitting handles it with no changes."""
+    lines = [f"## {machine_name}", ""]
+    for key, label in PROFILE_SECTIONS:
+        text = profile.get(key)
+        if not text:
+            continue
+        lines.append(f"### {label}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def chunk_text(text: str, machine_name: str) -> list[str]:
@@ -371,9 +504,8 @@ async def ingest_accessory(
 
 
 async def delete_accessory_from_index(accessory_id: str) -> None:
-    """Remove an accessory's Qdrant point. Best-effort, matching the existing
-    precedent — delete_machine doesn't clean up Qdrant points either, so this
-    isn't a new gap, just consistent with what's already here."""
+    """Remove an accessory's Qdrant point. Deterministic single-point id —
+    accessory text rarely needs more than one chunk (see ingest_accessory)."""
     client = get_client()
     if client is None:
         return
@@ -385,6 +517,36 @@ async def delete_accessory_from_index(accessory_id: str) -> None:
         )
     except Exception:
         log.exception("accessory_index_delete_failed", extra={"accessory_id": accessory_id})
+
+
+async def delete_machine_from_index(machine_id: str) -> None:
+    """Remove every Qdrant chunk belonging to a machine, by payload filter
+    rather than a deterministic id — unlike an accessory, a machine's
+    document can chunk into many points (chunk_text splits on paragraph
+    boundaries), so there's no single id to target. Best-effort: deleting
+    the Postgres row must not be blocked by a Qdrant hiccup, since the
+    machine is already gone from the catalog either way; a stray orphaned
+    chunk is a smaller problem than losing the delete entirely."""
+    from qdrant_client import models
+
+    client = get_client()
+    if client is None:
+        return
+    try:
+        await client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="machine_id", match=models.MatchValue(value=machine_id)
+                        )
+                    ]
+                )
+            ),
+        )
+    except Exception:
+        log.exception("machine_index_delete_failed", extra={"machine_id": machine_id})
 
 
 async def add_machine_from_document(
@@ -400,7 +562,16 @@ async def add_machine_from_document(
     lead_time: str | None = None,
     doc_type: DocumentType = DocumentType.BROCHURE,
 ) -> dict[str, Any]:
-    """Full pipeline: extract, persist the machine and document, index for RAG."""
+    """Full pipeline: extract, restructure into the rich product-profile shape,
+    persist the machine and document, index for RAG.
+
+    The client only wants to type the machine name and upload a document —
+    everything else (What it does / Who should buy it / Objections /
+    Responses / FAQs / etc., data/product_profile_template.md's shape) comes
+    from restructure_product_profile analysing the extracted text. Falls
+    back to ingesting the raw extracted text unchanged if that structuring
+    call fails, so an LLM hiccup costs richness, never the whole upload.
+    """
     text = await extract_text(data, filename, content_type)
 
     machine_id = await store.upsert_machine(
@@ -412,17 +583,21 @@ async def add_machine_from_document(
         lead_time=lead_time,
     )
 
+    profile = await structure_product_profile(text, name)
+    structured_text = format_profile_markdown(profile, name) if profile else None
+    stored_text = structured_text or text
+
     await store.save_machine_document(
         machine_id=machine_id,
         doc_type=doc_type,
         title=filename,
-        content=text,
+        content=stored_text,
     )
 
     result = await ingest_document(
         machine_name=name,
         category=category,
-        text=text,
+        text=stored_text,
         machine_code=machine_code,
         machine_id=machine_id,
         doc_type=doc_type,
@@ -434,5 +609,6 @@ async def add_machine_from_document(
         "machine_id": machine_id,
         "name": name,
         "characters_extracted": len(text),
+        "profile_sections_filled": len(profile) if profile else 0,
         **result,
     }

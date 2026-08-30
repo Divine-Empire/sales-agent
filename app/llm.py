@@ -105,6 +105,7 @@ async def complete(
     *,
     tools: list[dict[str, Any]] | None = None,
     temperature: float | None = None,
+    max_output_tokens: int | None = None,
     conversation_id: str | None = None,
 ) -> LLMResponse:
     """Run a chat completion, falling back to Groq on retryable failures.
@@ -118,7 +119,12 @@ async def complete(
         "temperature": temperature,
         # Latency scales with output length far more than input. The prompt
         # asks for short replies; this is the guardrail for when it does not.
-        "max_completion_tokens": settings.llm_max_output_tokens,
+        # A caller doing something other than a chat reply (e.g. restructuring
+        # a whole document into a product profile) can override this budget —
+        # same reasoning transcribe_image has its own ocr_max_output_tokens.
+        "max_completion_tokens": (
+            max_output_tokens if max_output_tokens is not None else settings.llm_max_output_tokens
+        ),
     }
     if tools:
         kwargs["tools"] = tools

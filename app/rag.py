@@ -145,6 +145,16 @@ async def ensure_collection() -> bool:
             field_name="codes",
             field_schema=models.PayloadSchemaType.KEYWORD,
         )
+        # Needed for documents.delete_machine_from_index's payload-filtered
+        # delete — same "index required but not found" 400 as codes above,
+        # caught live: deleting a machine removed its Postgres row but left
+        # every Qdrant chunk behind, so a deleted machine's specs/price
+        # could still surface in a customer's answer via RAG.
+        await client.create_payload_index(
+            collection_name=settings.qdrant_collection,
+            field_name="machine_id",
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
         return True
     except Exception:
         log.exception("qdrant_collection_failed")

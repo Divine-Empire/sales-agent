@@ -635,6 +635,50 @@ async def machine_documents(machine_id: str | None = None) -> dict[str, Any]:
     return {"count": len(rows), "documents": rows}
 
 
+@api.get("/machines/documents/{document_id}")
+async def get_machine_document(document_id: str) -> dict[str, Any]:
+    """Full content, for the dashboard's edit form — list_machine_documents
+    deliberately omits content since the list view never needed it."""
+    row = await store.get_machine_document(document_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    return row
+
+
+class MachineDocumentUpdate(BaseModel):
+    content: str
+
+
+@api.patch("/machines/documents/{document_id}")
+async def update_machine_document(
+    document_id: str, update: MachineDocumentUpdate
+) -> dict[str, Any]:
+    """Correct an ingested document's content — most often an AI-structured
+    product profile (see documents.structure_product_profile) that needs a
+    human fix. Re-ingests into Qdrant so RAG reflects the edit immediately,
+    not just the next time someone re-uploads."""
+    row = await store.update_machine_document_content(document_id, update.content)
+    if row is None:
+        raise HTTPException(status_code=500, detail="could not update document")
+
+    machine_id = row.get("machine_id")
+    machine = await store.get_machine_by_id(machine_id) if machine_id else None
+    reingested = False
+    if machine:
+        result = await documents.ingest_document(
+            machine_name=machine["name"],
+            category=machine["category"],
+            text=update.content,
+            machine_code=machine.get("machine_code"),
+            machine_id=machine_id,
+            price_range=machine.get("price_range"),
+            source_filename=row.get("title"),
+        )
+        reingested = result.get("embedded", 0) > 0
+
+    return {"id": document_id, "reingested": reingested}
+
+
 @api.post("/machines/upload")
 async def upload_machine_document(
     file: UploadFile = File(...),
@@ -710,9 +754,17 @@ async def add_machine_from_text(
 
 @api.delete("/machines/{machine_id}")
 async def delete_machine(machine_id: str) -> dict[str, Any]:
+    """Delete a machine and everything that belongs to it: the machines row,
+    its machine_documents (Postgres foreign key is ON DELETE CASCADE, so
+    those go automatically), and its Qdrant chunks — this last one used to
+    be left behind (documented as a known gap: 'delete_machine leaves its
+    Qdrant chunks behind, unlike accessories'), which meant a deleted
+    machine's specs/price could still surface in a customer's answer via
+    RAG even though it no longer existed in the catalog."""
     ok = await store.delete_machine(machine_id)
     if not ok:
         raise HTTPException(status_code=500, detail="could not delete machine")
+    await documents.delete_machine_from_index(machine_id)
     return {"id": machine_id, "deleted": True}
 
 
