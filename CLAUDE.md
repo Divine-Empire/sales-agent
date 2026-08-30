@@ -1281,6 +1281,51 @@ overriding a lead's category is a correction, not a permanent lock.
   instead of guessing; 3/3 runs on "Mujhe specifications batao" returned
   the real accuracy/range/battery numbers rather than a repeated use-case
   description.
+- A fifth real transcript, minutes after the fourth fix deployed, found
+  the two fixes above actively conflicting with each other on a
+  long-running conversation: the same machine (FX-201) got recommended
+  for FOUR genuinely different applications in a row — topo survey, then
+  road layout, then boundary survey, then construction setting-out — with
+  zero re-evaluation against the other catalog machines each time,
+  despite the COMPARE ACROSS MACHINES rule existing. Root cause: STAY ON
+  THE SAME MACHINE's original wording ("keep talking about that SAME one
+  ... unless the customer says something that actually changes the
+  answer") didn't say that naming a genuinely different application counts
+  as something that changes the answer — so on a conversation where
+  FX-201 had already been named once, the model treated "consistency"
+  as the overriding instruction and never re-ran the cross-machine
+  comparison for each new, distinct use case the customer went on to
+  name. This wasn't reproducible in isolated testing of either rule alone
+  — it only showed up on a real long conversation where a machine name
+  was already established in history before the sequence of different
+  applications began.
+
+  Fixed by rewording STAY ON THE SAME MACHINE to state explicitly that a
+  genuinely different application/use case (even within the same broad
+  category — moving from topo survey to road layout to boundary survey to
+  construction setting-out) is new information, not a repeat of the old
+  question, and requires re-running the full cross-machine comparison for
+  THAT use case as if it were the first question — never reflexively
+  repeating the earlier answer just because it also technically fits.
+
+  Verified against production Qdrant with the same four-use-case sequence
+  and realistic RAG query phrasing (short user messages, but a fuller
+  query text simulating what `_enrich_search_query` builds in real
+  conversations, so retrieval actually returns multiple different
+  machines the way production does): the model now genuinely
+  differentiates per use case — road layout got "Sokkia FIX-200 Series
+  better rahegi, kyunki road stakeout aur real-time road design layout ka
+  workflow diya gaya hai," and construction setting-out got "iX-605
+  better rahega, kyunki auto aiming aur Green/Red guide light se stakeout
+  team ko line par guide milta hai" — a genuinely different machine named
+  with a stated reason, not a reflexive repeat of the first answer. An
+  earlier version of this same test using bare 1-2-word RAG queries (no
+  conversation-context enrichment) under-tested the fix, since weak
+  retrieval on its own returned mostly accessory/component codes rather
+  than real machines — worth remembering if this ever needs re-testing:
+  match the RAG query to what `_enrich_search_query` actually builds in
+  production, not the bare customer message, or a real fix can look like
+  it didn't work.
 
 ## Conventions
 
