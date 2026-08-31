@@ -566,14 +566,22 @@ variant) was replaced a few hours later — see "Variants live under one
 machine" below — after the client clarified their own mental model is one
 machine with multiple types underneath it, not several separate machines.
 
-### GPT-5.6-terra: model switch + a variant-detection regression it caused (2026-08-30)
+### GPT-5-family support (added 2026-08-30; NOT the model in use)
 
-`OPENAI_MODEL` switched from `gpt-4o` to `gpt-5.6-terra` (the balanced tier
-of OpenAI's GPT-5.6 family — chosen over the flagship `sol` tier for better
-latency/cost on a real-time chat path, and over the cheap `luna` tier to
-keep reasoning depth for document structuring). This needed real code
-changes, not just an env var flip, because GPT-5-family models are a
-genuinely different API shape:
+**Read this first: production still runs `gpt-4o`.** `OPENAI_MODEL` is
+`gpt-4o` in `.env`, `.env.render`, `.env.example`, and as `app/config.py`'s
+default — verified 2026-08-31 against `/api/logs`, where every live turn
+reports `model: gpt-4o`. What follows is the *support* that was built so a
+switch to `gpt-5.6-terra` (the balanced tier of OpenAI's GPT-5.6 family —
+picked over the flagship `sol` tier for latency/cost on a real-time chat
+path, and over the cheap `luna` tier to keep reasoning depth for document
+structuring) becomes a config-only change. An earlier version of this
+section claimed the switch had already happened; it had not, and the
+variant-detection regression described below was found while *testing*
+against that model, not while running it in production.
+
+The support was needed because GPT-5-family models are a genuinely
+different API shape:
 
 - **`temperature` is rejected outright** (400 Bad Request) on every
   GPT-5-family model except gpt-5.1+ with `reasoning_effort="none"`.
@@ -1536,7 +1544,15 @@ reflectorless range) rather than defaulting back to FX-200.
 ## Conventions
 
 `uv` only, never pip. `ruff check`/`ruff format` before committing.
-Conventional commits. Push to both `divine` and `origin` remotes.
+Conventional commits. Push to both `divine` and `origin` remotes — **the
+sibling `sales-agent-dashboard` repo now has the same two-remote setup**
+(`divine` → `Divine-Empire/sales-agent-dashboard`, `origin` →
+`teamai-botivate/sales-agent-dashboard`, added 2026-08-31), so the same
+push-to-both rule applies there. `whatsapp-portal` has only `origin`
+(`Divine-Empire/whatsapp-portal`) and is not mirrored. The two remotes
+drifted once before — `origin/sales-agent` sat 31 commits behind `divine`
+until 2026-08-31 — so pushing only one is a real failure mode, not a
+theoretical one.
 `docs/` and `.claude/` are gitignored (planning material, not shipped code)
 — if you need their content, ask; don't assume it doesn't exist just because
 `git ls-files` won't show it.
