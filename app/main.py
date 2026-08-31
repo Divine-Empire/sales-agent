@@ -445,6 +445,18 @@ async def conversation(conversation_id: str) -> dict[str, Any]:
     }
 
 
+@api.delete("/conversations/{conversation_id}")
+async def delete_conversation_route(conversation_id: str) -> dict[str, Any]:
+    """Permanently delete a conversation (messages, summary, lead-score
+    history) from the inbox — for clearing test/demo conversations, not a
+    customer-facing action. Irreversible; the dashboard should confirm
+    before calling this."""
+    ok = await store.delete_conversation(conversation_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="could not delete conversation")
+    return {"conversation_id": conversation_id, "deleted": True}
+
+
 @api.get("/overview")
 async def overview() -> dict[str, Any]:
     """Everything the dashboard landing page needs, in one round trip."""

@@ -1118,6 +1118,40 @@ async def list_conversations(limit: int = 50, channel: str | None = None) -> lis
         return []
 
 
+async def delete_conversation(conversation_id: str) -> bool:
+    """Permanently remove a conversation and everything scoped to it —
+    messages, its conversation_summaries row, lead_scores history, and the
+    conversations row itself. Deliberately does NOT touch the customers
+    row: a customer can (and does) message on more than one channel, or
+    start a genuinely new conversation later, and deleting a test/clutter
+    conversation shouldn't erase who they are.
+
+    Built for clearing test/demo conversations out of the dashboard
+    inbox — irreversible, so the dashboard route calling this should
+    require explicit confirmation before hitting it.
+    """
+    client = await get_client()
+    if client is None:
+        return False
+    try:
+        await client.table("messages").delete().eq("conversation_id", conversation_id).execute()
+        await client.table("lead_scores").delete().eq("conversation_id", conversation_id).execute()
+        await (
+            client.table("conversation_summaries")
+            .delete()
+            .eq("conversation_id", conversation_id)
+            .execute()
+        )
+        await (
+            client.table("conversations").delete().eq("conversation_id", conversation_id).execute()
+        )
+        log.info("conversation_deleted", extra={"conversation_id": conversation_id})
+        return True
+    except Exception:
+        log.exception("conversation_delete_failed", extra={"conversation_id": conversation_id})
+        return False
+
+
 async def bootstrap_turn(
     channel: Channel,
     user_id: str,

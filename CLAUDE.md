@@ -1431,6 +1431,37 @@ every retrieval candidate (not just the final reply):
   single-code specs question, and a fully generic query with no code at
   all all still behave correctly after these changes.
 
+### Deleting test/demo conversations (added 2026-08-31)
+
+Live-testing the agent directly (bypassing Telegram entirely, per the
+"Real-human-style live testing" entry above) leaves real-looking
+conversations in the dashboard's inbox with no way to clear them except
+going into Supabase by hand. `DELETE /api/conversations/{id}`
+(`store.delete_conversation`) removes a conversation's `messages`,
+`conversation_summaries` row, `lead_scores` history, and the
+`conversations` row itself — deliberately leaves the `customers` row
+alone, since the same person can message again later or on another
+channel and shouldn't lose their identity because one old conversation
+was cleared. The dashboard's Telegram inbox now has a hover-revealed
+delete button per row (sibling repo), behind a native `confirm()` since
+this has no undo.
+
+Deliberately not exposed on the WhatsApp inbox: those conversations are
+mirrored in the whatsapp-portal's own separate Supabase (see the WhatsApp
+section above — this backend has no credentials for it and never writes
+to it). Deleting here would only clear this backend's local copy while
+the portal's own inbox — the one WhatsApp customers and the portal's
+other consumers actually see — stayed exactly as it was, which is worse
+than not offering delete at all: it would look like it worked while
+silently doing something different from what the button implies.
+
+Also used this session to clear the actual accumulated test data out of
+production: 8 Telegram conversations (all synthetic test IDs and one
+real-transcript conversation carried over from earlier verification work)
+deleted directly against Supabase before the dashboard feature existed.
+WhatsApp's 5 conversations were deliberately left alone at the user's
+explicit choice, given the cross-system mirroring concern above.
+
 ## Conventions
 
 `uv` only, never pip. `ruff check`/`ruff format` before committing.
