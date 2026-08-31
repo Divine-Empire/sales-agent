@@ -297,6 +297,68 @@ def is_smalltalk(query: str) -> bool:
 # given code when several chunks share it, never to exclude the others.
 _PREFERRED_SECTION_MARKERS = ("Features", "What it does", "Price")
 
+# Sections that describe what a product actually IS/does, as opposed to
+# meta content (an AI-estimate objection/FAQ/response, upselling notes)
+# that presupposes the reader already knows the product fits — used by
+# _diversify to make sure at least one genuinely descriptive chunk per
+# machine survives into the final result, not just whichever chunks scored
+# highest on raw vector similarity.
+_CORE_SECTION_MARKERS = ("What it does", "Who should buy it", "Features", "Benefits")
+
+
+def _diversify(candidates: list[RetrievedChunk], limit: int) -> list[RetrievedChunk]:
+    """Pick `limit` chunks out of an over-fetched candidate pool, biased
+    toward covering more DISTINCT machines with their own CORE content,
+    rather than just the top-`limit` chunks by raw vector score.
+
+    Found live: a customer describing a use case in their own words (no
+    exact model code to anchor on) could get a top-4 vector result that was
+    several generic AI-estimate sections (Common objections, Responses)
+    from only one or two machines — every other catalog machine's actual
+    "What it does" was still in the top-16 candidate pool, just scored
+    slightly lower, and got crowded out entirely. The agent then had no
+    real content to compare against for those other machines and defaulted
+    to naming whichever one it did have content for, not the best fit.
+
+    Two passes: first, walk the candidates in score order and take the
+    first CORE-content chunk (see _CORE_SECTION_MARKERS) from each
+    not-yet-seen machine_code — this guarantees real substance for as many
+    distinct machines as the pool actually contains, in relevance order.
+    Second, fill any remaining slots with whatever's left, still in score
+    order — a single machine with a very strong top score can still fill
+    the whole result if the pool genuinely has nothing else relevant; this
+    never invents relevance that wasn't already there.
+    """
+    if len(candidates) <= limit:
+        return candidates
+
+    picked: list[RetrievedChunk] = []
+    seen_codes: set[str | None] = set()
+    for chunk in candidates:
+        if len(picked) >= limit:
+            break
+        if chunk.machine_code in seen_codes:
+            continue
+        if any(marker in chunk.text for marker in _CORE_SECTION_MARKERS):
+            picked.append(chunk)
+            seen_codes.add(chunk.machine_code)
+
+    if len(picked) < limit:
+        picked_texts = {c.text for c in picked}
+        for chunk in candidates:
+            if len(picked) >= limit:
+                break
+            if chunk.text not in picked_texts:
+                picked.append(chunk)
+                picked_texts.add(chunk.text)
+
+    # Restore original relevance order rather than leaving the "core
+    # content first" pass's machine-grouping as the final order — the
+    # model should still see the single most relevant chunk first.
+    order = {id(c): i for i, c in enumerate(candidates)}
+    picked.sort(key=lambda c: order.get(id(c), len(candidates)))
+    return picked[:limit]
+
 
 async def _exact_code_matches(
     client: AsyncQdrantClient, query: str, conversation_id: str | None
@@ -419,10 +481,24 @@ async def search(
             return []
 
         try:
+            # Over-fetch beyond `limit` so there's real material to pick a
+            # DIVERSE, CORE-CONTENT-FIRST final set from — found live: with
+            # no exact model code in the query (a customer describing a use
+            # case in their own words, e.g. "construction setting-out" —
+            # the common case for anyone who hasn't already named a model),
+            # a plain top-`limit` vector search could return several chunks
+            # that all happened to be generic AI-estimate sections (Common
+            # objections, Responses) from just one or two machines, crowding
+            # out every other machine's own "What it does"/Features content
+            # entirely — the model then had nothing to compare against and
+            # defaulted to naming whichever machine it had real content for,
+            # not the best actual fit. Over-fetching and re-ranking below
+            # fixes this without touching what gets returned when the
+            # top-`limit` results were already fine.
             response = await client.query_points(
                 collection_name=settings.qdrant_collection,
                 query=vectors[0],
-                limit=limit,
+                limit=max(limit * 4, 16),
                 score_threshold=settings.rag_score_threshold,
                 with_payload=True,
             )
@@ -430,7 +506,7 @@ async def search(
             log.exception("rag_search_failed", extra={"conversation_id": conversation_id})
             return []
 
-        chunks = [
+        candidates = [
             RetrievedChunk(
                 text=p.payload.get("text", ""),
                 score=p.score,
@@ -440,6 +516,7 @@ async def search(
             for p in response.points
             if p.payload
         ]
+        chunks = _diversify(candidates, limit)
 
         # Exact code matches go first and are never dropped for a lower-scoring
         # vector hit — see _exact_code_matches's docstring for the real failure

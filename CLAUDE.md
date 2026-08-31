@@ -1462,6 +1462,77 @@ deleted directly against Supabase before the dashboard feature existed.
 WhatsApp's 5 conversations were deliberately left alone at the user's
 explicit choice, given the cross-system mirroring concern above.
 
+## RAG retrieval defaulted to one machine family for every use case (2026-08-31)
+
+Exhaustive real-human-style testing (per the user's explicit "test
+literally everything" mandate) surfaced a real bias: vague use-case
+questions with no exact model code ("construction setting-out ke liye",
+"road layout ka kaam hai") got the same Sokkia FX-200 series recommended
+every single time, even though the catalog holds four genuinely different
+total-station lines (FX-200 series, iM-60series, iM-100, iX). Confirmed by
+directly inspecting Qdrant, not just trusting replies (per the user's own
+instruction to verify against real data): a plain vector search for these
+queries returned several chunks that were all generic AI-estimate sections
+(Common objections, Responses — see "Missing-section enrichment" above)
+from just one or two machines, while every other machine's genuine "What it
+does"/Features content was still in the wider candidate pool, just scored
+a little lower — crowded out of the top-`rag_top_k` results entirely. The
+model then had real content for only the machine that survived and
+defaulted to it, not because it was actually the best fit.
+
+Two candidate fixes were considered — improving RAG diversity, and adding
+a second router/decision LLM agent that explicitly picks what to say when.
+The user chose to implement RAG diversity properly first (a router agent
+would add a second LLM call's latency/cost to every turn, and `app/agent.py`'s
+own module docstring already states the deliberate design: "One agent, one
+job... No router agent, no second LLM in the conversation path"); once the
+diversity fix was verified to fix the actual retrieval problem, adding a
+router agent on top was confirmed unnecessary and explicitly not built.
+
+Fixed in `app/rag.py`: `search()`'s vector query now over-fetches
+(`max(limit * 4, 16)` instead of `limit`) and a new `_diversify()` picks
+the final result set in two passes — first, walk candidates in score order
+and take the first CORE-content chunk (`_CORE_SECTION_MARKERS`: "What it
+does", "Who should buy it", "Features", "Benefits") from each
+not-yet-seen `machine_code`, guaranteeing real differentiator content for
+as many distinct machines as the pool actually contains; second, fill any
+remaining slots from whatever's left, still by score. Final order is
+restored to original relevance order afterward — the single most relevant
+chunk still comes first, diversity only affects which chunks make the cut,
+not their presentation order. A query that already had one dominant,
+clearly-best machine is unaffected (that machine's chunks still fill most
+or all of the result if nothing else is genuinely relevant) — this never
+manufactures relevance that wasn't there.
+
+This fixed retrieval diversity but exposed a second, separate gap once
+verified end-to-end: even with genuinely diverse, real content for four
+different machines in context, the model still named a specific type
+("Sokkia FX-201") straight off a bare application description, rather than
+asking the differentiating question the existing "MULTIPLE TYPES UNDER ONE
+MACHINE" hard rule (`app/prompts.py`) already called for. Root cause:
+that rule said to ask a differentiating question "if the customer's stated
+need does not already point to one specific type" — but the model was
+treating a general application (survey, road layout, construction
+setting-out) as if it already pointed to one, since most types under a
+series can plausibly do most general survey work. Same pattern seen
+repeatedly elsewhere in this file: an abstract rule is a nudge, not a
+guarantee, and needs a concrete worked example to actually bite. Fixed by
+extending the rule with an explicit statement that a general application
+alone is NOT a differentiator, plus the exact failing example verbatim
+("construction setting-out ke liye equipment chahiye" should get a
+precision/budget question, never a type name yet).
+
+Verified end-to-end against the real pipeline (Supabase writes
+monkeypatched, real LLM + real Qdrant): before the prompt fix, "Survey ke
+liye" → "Construction setting-out ke liye" → "Road layout ka kaam hai"
+named a type (FX-201, then FIX-200 series) on the very first application
+mention, both times. After the fix, the same three turns correctly asked
+"2-inch precision zaroori hai ya 5-inch accuracy sufficient rahegi?"
+instead of naming a type both times — and a follow-up turn stating "2-inch
+precision chahiye" then correctly named a real differentiated variant
+(iM-62, with its own genuine specs: 2″ angle accuracy, 0.3–500m
+reflectorless range) rather than defaulting back to FX-200.
+
 ## Conventions
 
 `uv` only, never pip. `ruff check`/`ruff format` before committing.
